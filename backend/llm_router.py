@@ -1,0 +1,608 @@
+import os
+import sys
+import re
+import json
+import requests
+from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+
+# Ensure stdout uses UTF-8 to prevent Windows-specific print crashes
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+load_dotenv()
+
+# Sarvam AI API Configurations
+sarvam_api_key = os.getenv("SARVAM_API_KEY", "")
+sarvam_api_url = os.getenv("SARVAM_API_URL", "https://api.sarvam.ai/v1/chat/completions")
+sarvam_model = os.getenv("SARVAM_MODEL", "sarvam-30b")
+
+
+import time
+
+def _post_with_retry(url: str, headers: dict, json_payload: dict, timeout: int = 180, max_retries: int = 3) -> requests.Response:
+    """
+    Executes a POST request to Sarvam API with exponential backoff retries for 5xx errors or timeouts.
+    """
+    backoff = 2
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(url, headers=headers, json=json_payload, timeout=timeout)
+            if response.status_code in [500, 502, 503, 504]:
+                print(f"[LLM Router] Transient server error {response.status_code}. Attempt {attempt + 1}/{max_retries + 1}...")
+                if attempt == max_retries:
+                    return response
+            else:
+                return response
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            print(f"[LLM Router] Request timeout or connection error on attempt {attempt + 1}/{max_retries + 1}: {e}")
+            if attempt == max_retries:
+                raise e
+        
+        # Wait before next attempt
+        time.sleep(backoff)
+        backoff *= 2
+
+
+class ThinkStripper:
+    def __init__(self):
+        self.buffer = ""
+        self.inside_think = False
+
+    def feed(self, token: str) -> str:
+        if token is None:
+            token = ""
+        self.buffer += token
+        output = ""
+        
+        while True:
+            if not self.inside_think:
+                # Look for "<think>"
+                idx = self.buffer.find("<think>")
+                if idx != -1:
+                    output += self.buffer[:idx]
+                    self.buffer = self.buffer[idx + 7:]
+                    self.inside_think = True
+                else:
+                    # Check for partial "<think" at the end of the buffer
+                    partial_found = False
+                    for i in range(1, min(len(self.buffer), 7)):
+                        suffix = self.buffer[-i:]
+                        if "<think>".startswith(suffix):
+                            output += self.buffer[:-i]
+                            self.buffer = suffix
+                            partial_found = True
+                            break
+                    if not partial_found:
+                        output += self.buffer
+                        self.buffer = ""
+                    break
+            else:
+                # Inside think, look for "</think>"
+                idx = self.buffer.find("</think>")
+                if idx != -1:
+                    self.buffer = self.buffer[idx + 8:]
+                    self.inside_think = False
+                else:
+                    # Check for partial "</think" at the end of the buffer
+                    partial_found = False
+                    for i in range(1, min(len(self.buffer), 8)):
+                        suffix = self.buffer[-i:]
+                        if "</think>".startswith(suffix):
+                            self.buffer = suffix
+                            partial_found = True
+                            break
+                    if not partial_found:
+                        self.buffer = ""
+                    break
+        return output
+
+    def flush(self) -> str:
+        if not self.inside_think:
+            res = self.buffer
+            self.buffer = ""
+            return res
+        return ""
+
+
+def generate_answer(messages: List[Dict[str, str]]) -> str:
+    """
+    Calls Sarvam AI completions (non-streaming, max_tokens=2048) and strips thinking blocks.
+    Also handles repetition and loop prevention in responses.
+    """
+    if not sarvam_api_key:
+        print("[LLM Router] Warning: SARVAM_API_KEY is not set.")
+
+    headers = {
+        "api-subscription-key": sarvam_api_key,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": sarvam_model,
+        "messages": messages,
+        "temperature": 0.0,
+        "stream": False,
+        "max_tokens": 4096,
+        "reasoning_effort": None
+    }
+    
+    print(f"[LLM Router] Calling Sarvam AI completions...")
+    response = _post_with_retry(sarvam_api_url, headers=headers, json_payload=payload, timeout=180)
+    
+    if response.status_code != 200:
+        print(f"[LLM Router] Sarvam AI returned status {response.status_code}: {response.text}")
+        raise ValueError(f"Sarvam AI returned status {response.status_code}")
+
+    res_json = response.json()
+    choices = res_json.get("choices", [])
+    reply_content = ""
+    if choices:
+        message_obj = choices[0].get("message", {})
+        reply_content = message_obj.get("content") or ""
+    
+    # Strip reasoning tags
+    stripper = ThinkStripper()
+    clean_reply = stripper.feed(reply_content) + stripper.flush()
+    clean_reply = clean_reply.strip()
+    
+    # Repetition / Infinite loop prevention post-processing
+    clean_reply = clean_reply.replace("\r\n", "\n")
+    
+    # Deduplicate consecutive paragraphs
+    paragraphs = clean_reply.split("\n")
+    seen_paras = set()
+    unique_paras = []
+    for p in paragraphs:
+        p_stripped = p.strip()
+        if not p_stripped:
+            unique_paras.append("")
+            continue
+        # Normalize to find duplicates
+        norm_p = re.sub(r'[^a-zA-Z0-9\u0900-\u097F]', '', p_stripped).lower()
+        if norm_p not in seen_paras:
+            seen_paras.add(norm_p)
+            unique_paras.append(p)
+    clean_reply = "\n".join(unique_paras)
+    clean_reply = re.sub(r'\n{3,}', '\n\n', clean_reply).strip()
+    
+    # Deduplicate consecutive sentences within the text
+    sentences = re.split(r'([.!?।\n]+)', clean_reply)
+    seen_sents = set()
+    reconstructed = []
+    i = 0
+    while i < len(sentences):
+        sent = sentences[i]
+        punc = sentences[i+1] if i + 1 < len(sentences) else ""
+        sent_stripped = sent.strip()
+        if not sent_stripped:
+            reconstructed.append(sent + punc)
+            i += 2
+            continue
+        norm_s = re.sub(r'[^a-zA-Z0-9\u0900-\u097F]', '', sent_stripped).lower()
+        # Don't filter out numbers/short bullet indicators (length < 6 chars)
+        if len(norm_s) < 6 or norm_s not in seen_sents:
+            if len(norm_s) >= 6:
+                seen_sents.add(norm_s)
+            reconstructed.append(sent + punc)
+        i += 2
+    
+    final_clean = "".join(reconstructed).strip()
+    return final_clean
+
+
+def detect_query_language(query: str) -> str:
+    """
+    Calls Sarvam AI to detect if the query is in English, Hindi, or Hinglish.
+    Returns: 'en', 'hi', or 'hinglish'.
+    """
+    if not query:
+        return 'en'
+        
+    # Check for Devanagari characters first - fast and 100% accurate for Devanagari Hindi
+    for char in query:
+        if '\u0900' <= char <= '\u097F':
+            return 'hi'
+            
+    prompt = (
+        "Identify the language of the following user query.\n"
+        "The language can be English, Hindi (in Devanagari script), or Hinglish (Hindi written in Roman/Latin script).\n\n"
+        f"Query: '{query}'\n\n"
+        "Instructions:\n"
+        "- Respond with EXACTLY one of these three strings: 'english', 'hindi', or 'hinglish'.\n"
+        "- Do not explain your answer. Do not include formatting or markdown. Only return the lowercase word.\n\n"
+        "Language:"
+    )
+
+    try:
+        headers = {
+            "api-subscription-key": sarvam_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": sarvam_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": 256,
+            "reasoning_effort": None
+        }
+        
+        print(f"[LLM Router] Calling language detection endpoint...")
+        res = _post_with_retry(sarvam_api_url, headers=headers, json_payload=payload, timeout=45)
+        if res.status_code == 200:
+            choices = res.json().get("choices", [])
+            reply = ""
+            reasoning = ""
+            if choices:
+                message_obj = choices[0].get("message", {})
+                reply = message_obj.get("content") or ""
+                reasoning = message_obj.get("reasoning_content") or ""
+            
+            print(f"[LLM Router] Language detection raw reply: '{reply}'")
+            print(f"[LLM Router] Language detection raw reasoning: '{reasoning}'")
+            reply_lower = reply.strip().lower()
+            reasoning_lower = reasoning.strip().lower()
+            
+            # Strip reasoning tags if present in reply
+            stripper = ThinkStripper()
+            reply_clean = stripper.feed(reply_lower) + stripper.flush()
+            reply_clean = reply_clean.strip()
+
+            print(f"[LLM Router] Language detection stripped reply: '{reply_clean}'")
+            
+            def extract_lang(text: str) -> Optional[str]:
+                found = re.findall(r'\b(english|hindi|hinglish)\b', text.lower())
+                if found:
+                    if 'hinglish' in found:
+                        return 'hinglish'
+                    if 'english' in found:
+                        return 'en'
+                    if 'hindi' in found:
+                        return 'hi'
+                return None
+
+            # 1. Check stripped response
+            detected = extract_lang(reply_clean)
+            if detected:
+                return detected
+                
+            # 2. Fallback: check raw content response
+            detected = extract_lang(reply_lower)
+            if detected:
+                return detected
+
+            # 3. Fallback: check reasoning_content
+            detected = extract_lang(reasoning_lower)
+            if detected:
+                return detected
+        else:
+            print(f"[LLM Router] Language detection API call failed with status code {res.status_code}")
+    except Exception as e:
+        print(f"[LLM Router] Language detection failed: {e}")
+        
+    # Basic unicode fallback
+    for char in query:
+        if '\u0900' <= char <= '\u097F':
+            return 'hi'
+            
+            
+    return 'en'
+
+
+def translate_query_to_english(query: str) -> str:
+    """
+    Translates a Hindi or Hinglish query to English using Sarvam's LLM instead of the translation API.
+    """
+    if not query:
+        return ""
+
+    prompt = (
+        "You are an English translation assistant. Translate the user's input query to standard English.\n"
+        "The input query can be in English, Hindi (in Devanagari script), or Hinglish (Hindi written in the Roman/Latin alphabet).\n"
+        "If the input query is already in standard English, output it as-is. "
+        "Output ONLY the final English translation and nothing else.\n\n"
+        f"Input: {query}\n"
+        "Output:"
+    )
+
+    try:
+        headers = {
+            "api-subscription-key": sarvam_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": sarvam_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": 4096,
+            "reasoning_effort": None
+        }
+        
+        print(f"[LLM Router] Translating query to English using LLM...")
+        res = _post_with_retry(sarvam_api_url, headers=headers, json_payload=payload, timeout=90)
+        if res.status_code == 200:
+            choices = res.json().get("choices", [])
+            reply = ""
+            if choices:
+                message_obj = choices[0].get("message", {})
+                reply = message_obj.get("content") or ""
+            
+            # Clean up thinking blocks if any
+            stripper = ThinkStripper()
+            reply_clean = (stripper.feed(reply) + stripper.flush()).strip()
+            
+            # Clean up potential prompt leakage
+            if "Output:" in reply_clean:
+                reply_clean = reply_clean.split("Output:")[-1].strip()
+            if "Input:" in reply_clean:
+                reply_clean = reply_clean.split("Input:")[0].strip()
+                
+            if not reply_clean:
+                print("[LLM Router] Translated query to English is empty, falling back to original query")
+                return query
+            return reply_clean
+        else:
+            print(f"[LLM Router] LLM query translation failed with status code {res.status_code}: {res.text}")
+    except Exception as e:
+        print(f"[LLM Router] LLM query translation failed: {e}")
+        
+    return query
+
+
+def translate_query_to_hindi(query: str) -> str:
+    """
+    Translates an English query to Hindi using Sarvam's LLM.
+    """
+    if not query:
+        return ""
+
+    prompt = (
+        "You are a Hindi translation assistant. Translate the user's input query to Hindi Devanagari script.\n"
+        "The input query can be in English, Hindi (in Devanagari script), or Hinglish (Hindi written in the Roman/Latin alphabet).\n"
+        "If the input query is already in standard Hindi Devanagari script, output it as-is. "
+        "Output ONLY the final Hindi translation in Devanagari script and nothing else.\n\n"
+        f"Input: {query}\n"
+        "Output:"
+    )
+
+    try:
+        headers = {
+            "api-subscription-key": sarvam_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": sarvam_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": 4096,
+            "reasoning_effort": None
+        }
+        
+        print(f"[LLM Router] Translating query to Hindi using LLM...")
+        res = _post_with_retry(sarvam_api_url, headers=headers, json_payload=payload, timeout=90)
+        if res.status_code == 200:
+            choices = res.json().get("choices", [])
+            reply = ""
+            if choices:
+                message_obj = choices[0].get("message", {})
+                reply = message_obj.get("content") or ""
+            
+            # Clean up thinking blocks if any
+            stripper = ThinkStripper()
+            reply_clean = (stripper.feed(reply) + stripper.flush()).strip()
+            
+            # Clean up potential prompt leakage
+            if "Output:" in reply_clean:
+                reply_clean = reply_clean.split("Output:")[-1].strip()
+            if "Input:" in reply_clean:
+                reply_clean = reply_clean.split("Input:")[0].strip()
+                
+            if not reply_clean:
+                print("[LLM Router] Translated query to Hindi is empty, falling back to original query")
+                return query
+            return reply_clean
+        else:
+            print(f"[LLM Router] LLM query translation to Hindi failed with status code {res.status_code}: {res.text}")
+    except Exception as e:
+        print(f"[LLM Router] LLM query translation to Hindi failed: {e}")
+        
+    return query
+
+
+def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    """
+    Service classification mapping matching query to correct serial number 'sno'.
+    Uses rule-based heuristics first, then calls Sarvam AI if no high-confidence rule match is found.
+    """
+    if not query:
+        return {"sno": None, "service_id": None}
+
+    q_lower = query.lower()
+
+    # Define in-scope keywords
+    has_marriage = any(k in q_lower for k in ["marriage", "shadi", "vivah", "विवाह", "शादी"])
+    has_gazette = any(k in q_lower for k in ["gazette", "name change", "नाम परिवर्तन", "राजपत्र", "affidavit for name change"])
+    has_domicile = any(k in q_lower for k in ["domicile", "resident", "residence", "निवास", "मूल निवासी"])
+    has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग"])
+    has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar"])
+
+    has_in_scope = has_marriage or has_gazette or has_domicile or has_obc or has_caste
+
+    # Define out-of-scope keywords
+    has_out_of_scope = any(k in q_lower for k in [
+        "scholarship", "छात्रवृत्ति", "matric", "स्कॉलरशिप",
+        "rental", "rent", "किराया", "रेंट", "एग्रीमेंट",
+        "water connection", "जल कनेक्शन", "नल कनेक्शन", "water supply",
+        "electricity", "बिजली", "power", "विद्युत",
+        "ration card", "राशन कार्ड",
+        "land records", "khasra", "khatauni", "b-1", "b-i", "खसरा", "नक्शा", "ज़मीन",
+        "housing loan", "home loan", "ऋण", "लोन", "loan",
+        "income certificate", "आय प्रमाण पत्र", "आय प्रमाणपत्र"
+    ])
+
+    # If it contains out-of-scope keywords and NOT in-scope keywords, it is definitely out-of-scope
+    if has_out_of_scope and not has_in_scope:
+        print(f"[LLM Router] Rule-based filter: Query contains out-of-scope terms and no in-scope terms. Mapping to None.")
+        return {"sno": None, "service_id": None}
+
+    # 1. Quick rule-based heuristic check for high confidence in-scope keywords
+    if has_marriage:
+        return {"sno": "1", "service_id": "3"}
+    if has_gazette:
+        return {"sno": "5", "service_id": "201"}
+    if has_obc:
+        return {"sno": "3", "service_id": "5"}
+    if has_caste:
+        return {"sno": "2", "service_id": "4"}
+    if has_domicile:
+        return {"sno": "4", "service_id": "7"}
+
+    # 2. Try semantic database lookup before LLM fallback
+    try:
+        try:
+            from backend.rag import collection, embedding_model
+        except ImportError:
+            from rag import collection, embedding_model
+
+        print(f"[LLM Router] Performing semantic lookup fallback for query: '{query}'")
+        query_text = f"query: {query}"
+        query_vector = embedding_model.encode(query_text).tolist()
+        
+        # Query database without service filter
+        results = collection.query(
+            query_embeddings=[query_vector],
+            n_results=3,
+            where={"lang": "en"}
+        )
+        
+        if results and "documents" in results and results["documents"]:
+            docs = results["documents"][0]
+            metas = results["metadatas"][0]
+            distances = results["distances"][0]
+            
+            if distances and distances[0] < 0.45:
+                matched_sid = metas[0].get("service_id")
+                if matched_sid:
+                    # Find matching sno in services_list
+                    matched_sno = None
+                    for s in services_list:
+                        if str(s["service_id"]) == str(matched_sid):
+                            matched_sno = str(s["sno"])
+                            break
+                    if matched_sno:
+                        print(f"[LLM Router] Semantic match found: service_id {matched_sid} (sno {matched_sno}) with distance {distances[0]:.4f}")
+                        return {"sno": matched_sno, "service_id": str(matched_sid)}
+    except Exception as e:
+        print(f"[LLM Router] Semantic classification fallback failed: {e}")
+
+    # 3. Fall back to LLM classification for complex/ambiguous queries
+    services_catalog_desc = "\n".join([
+        f"{s['sno']}. Serial Number {s['sno']} (Service ID: {s['service_id']}): {s['name_en']} | {s['name_hi']}"
+        for s in services_list
+    ])
+
+    prompt = (
+        "You are an expert service mapping assistant for the SewaSetu Chhattisgarh portal.\n"
+        "Your task is to identify which specific service from the catalog is the closest match to the user query.\n"
+        "The query could be in English, Hindi, or Hinglish.\n\n"
+        "Here is the catalog of services:\n"
+        f"{services_catalog_desc}\n\n"
+        f"User Query: '{query}'\n\n"
+        "Instructions:\n"
+        "- Match the query to a service if the query is asking about requirements, rules, procedures, fees, eligibility, or lists of Castes/Tribes related to that service.\n"
+        "- For example, queries about specific castes (SC/ST/OBC), tribes, or caste list entries belong to the SC/ST Certificate or OBC Certificate services.\n"
+        "- Domicile/Residence queries belong to the Domicile Certificate service.\n"
+        "- Marriage registration/certificate queries belong to the Marriage Registration & Certificate service.\n"
+        "- Name change, gazette publication, or affidavit for name change queries belong to the Ordinary Gazette Notification for Name Change service.\n"
+        "- If the query is generic, completely unrelated to these 5 services (e.g., solar panels, water connections, electricity, scholarships, land records, or general chat), return {\"sno\": null, \"service_id\": null}.\n"
+        "- Return ONLY a JSON object containing the mapped 'sno' and 'service_id' as strings. For example: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Do not explain your choice. Do not output markdown, only raw JSON.\n\n"
+        "Output JSON:"
+    )
+
+    try:
+        headers = {
+            "api-subscription-key": sarvam_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": sarvam_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": 512,
+            "reasoning_effort": None
+        }
+        
+        print(f"[LLM Router] Calling classification endpoint...")
+        res = _post_with_retry(sarvam_api_url, headers=headers, json_payload=payload, timeout=30)
+        if res.status_code == 200:
+            choices = res.json().get("choices", [])
+            reply = ""
+            if choices:
+                message_obj = choices[0].get("message", {})
+                reply = message_obj.get("content") or ""
+            reply = reply.strip()
+            
+            # Strip reasoning tags
+            stripper = ThinkStripper()
+            reply = stripper.feed(reply) + stripper.flush()
+            reply = reply.strip()
+
+            json_match = re.search(r'\{.*?\}', reply, re.DOTALL)
+            if json_match:
+                json_data = json.loads(json_match.group(0))
+                sno_val = json_data.get("sno")
+                sid_val = json_data.get("service_id")
+                if sno_val and str(sno_val).lower() != "null":
+                    # Validate that the sno matches a valid sno in services
+                    valid_snos = {str(s["sno"]) for s in services_list}
+                    if str(sno_val) in valid_snos:
+                        return {
+                            "sno": str(sno_val),
+                            "service_id": str(sid_val) if sid_val else None
+                        }
+    except Exception as e:
+        print(f"[LLM Router] Service mapping classification failed: {e}")
+
+    return {"sno": None, "service_id": None}
+
+
+def classify_query_intent(query: str, service_id: Optional[Any]) -> str:
+    """
+    Classifies if the query is specifically for Marriage Registration (service_id=3) and is asking about
+    where to register/apply for their marriage or specific offices (returns 'location').
+    All other queries return 'information'.
+    """
+    if service_id is None:
+        return "information"
+    try:
+        sid_int = int(service_id)
+    except (ValueError, TypeError):
+        return "information"
+        
+    if sid_int != 3:
+        return "information"
+        
+    prompt = (
+        "You are an intent classification assistant for the SewaSetu Chhattisgarh portal.\n"
+        "Classify if the user query is specifically asking about WHERE to register their marriage, "
+        "which office/authority to submit their marriage application to, or mentioning a specific wedding venue/address "
+        "asking for its corresponding registration center (return 'location').\n"
+        "If the user is asking general questions (e.g., required documents, fees, SLA, timelines, or eligibility), "
+        "return 'information'.\n"
+        "Respond with EXACTLY 'location' or 'information'. Do not explain or return markdown.\n\n"
+        f"Query: '{query}'\n"
+        "Intent:"
+    )
+    try:
+        res = generate_answer([{"role": "user", "content": prompt}])
+        res_clean = res.strip().lower()
+        if "location" in res_clean:
+            return "location"
+    except Exception as e:
+        print(f"[LLM Router] classify_query_intent failed: {e}")
+    return "information"
+

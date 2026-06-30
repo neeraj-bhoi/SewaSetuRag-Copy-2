@@ -1,0 +1,69 @@
+{
+  "services": [
+    {
+      "sno": "1",
+      "service_id": "3",
+      "name_en": "Marriage Registration & Certificate",
+      "name_hi": "विवाह पंजीकरण एवं प्रमाण पत्र",
+      "dept_en": "Urban Administration and development Department",
+      "dept_hi": "नगरीय प्रशासन एवं विकास विभाग",
+      "is_internal": true,
+      "path_en": "data/profiles/service_3_en.json",
+      "path_hi": "data/profiles/service_3_hi.json",
+      "manual_path_en": "data/extracted_text/combined_manual_3_en.txt",
+      "manual_path_hi": "data/extracted_text/combined_manual_3_hi.txt"
+    },
+    {
+      "sno": "2",
+      "service_id": "4",
+      "name_en": "SC/ST Certificate",
+      "name_hi": "अनुसूचित जाति / अनुसूचित जनजाति प्रमाण पत्र",
+      "dept_en": "Revenue and disaster management Department",
+      "dept_hi": "राजस्व एवं आपदा प्रबंधन विभाग",
+      "is_internal": true,
+      "path_en": "data/profiles/service_4_en.json",
+      "path_hi": "data/profiles/service_4_hi.json",
+      "manual_path_en": "data/extracted_text/combined_manual_4_en.txt",
+      "manual_path_hi": "data/extracted_text/combined_manual_4_hi.txt"
+    },
+    {
+      "sno": "3",
+      "service_id": "5",
+      "name_en": "OBC Certificate",
+      "name_hi": "अन्य पिछड़ा वर्ग प्रमाण पत्र",
+      "dept_en": "Revenue and disaster management Department",
+      "dept_hi": "राजस्व एवं आपदा प्रबंधन विभाग",
+      "is_internal": true,
+      "path_en": "data/profiles/service_5_en.json",
+      "path_hi": "data/profiles/service_5_hi.json",
+      "manual_path_en": "data/extracted_text/combined_manual_5_en.txt",
+      "manual_path_hi": "data/extracted_text/combined_manual_5_hi.txt"
+    },
+    {
+      "sno": "4",
+      "service_id": "7",
+      "name_en": "Domicile Certificate",
+      "name_hi": "मूल निवासी प्रमाण पत्र",
+      "dept_en": "Revenue and disaster management Department",
+      "dept_hi": "राजस्व एवं आपदा प्रबंधन विभाग",
+      "is_internal": true,
+      "path_en": "data/profiles/service_7_en.json",
+      "path_hi": "data/profiles/service_7_hi.json",
+      "manual_path_en": "data/extracted_text/combined_manual_7_en.txt",
+      "manual_path_hi": "data/extracted_text/combined_manual_7_hi.txt"
+    },
+    {
+      "sno": "5",
+      "service_id": "201",
+      "name_en": "Ordinary Gazette Notification for Name Change",
+      "name_hi": "नाम परिवर्तन के लिए साधारण राजपत्र अधिसूचना",
+      "dept_en": "Government Printing and Stationery Department",
+      "dept_hi": "शासकीय मुद्रण एवं लेखन सामग्री विभाग",
+      "is_internal": true,
+      "path_en": "data/profiles/service_201_en.json",
+      "path_hi": "data/profiles/service_201_hi.json",
+      "manual_path_en": "data/extracted_text/combined_manual_201_en.txt",
+      "manual_path_hi": "data/extracted_text/combined_manual_201_hi.txt"
+    }
+  ]
+}

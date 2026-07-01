@@ -297,9 +297,10 @@ def translate_query_to_english(query: str) -> str:
         return ""
 
     prompt = (
-        "You are an English translation assistant. Translate the user's input query to standard English.\n"
-        "The input query can be in English, Hindi (in Devanagari script), or Hinglish (Hindi written in the Roman/Latin alphabet).\n"
-        "If the input query is already in standard English, output it as-is. "
+        "You are a strict translation assistant. Translate the user's input to standard English.\n"
+        "Do NOT answer the query or question. Do NOT add any extra explanation, response, or conversational filler.\n"
+        "If the input query is already in standard English, output it exactly as-is.\n"
+        "If it is a question, keep it as a question in English. Do NOT answer it.\n"
         "Output ONLY the final English translation and nothing else.\n\n"
         f"Input: {query}\n"
         "Output:"
@@ -357,10 +358,16 @@ def translate_query_to_hindi(query: str) -> str:
     if not query:
         return ""
 
+    # Check for Devanagari characters first - fast and 100% accurate for Devanagari Hindi
+    for char in query:
+        if '\u0900' <= char <= '\u097F':
+            return query
+
     prompt = (
-        "You are a Hindi translation assistant. Translate the user's input query to Hindi Devanagari script.\n"
-        "The input query can be in English, Hindi (in Devanagari script), or Hinglish (Hindi written in the Roman/Latin alphabet).\n"
-        "If the input query is already in standard Hindi Devanagari script, output it as-is. "
+        "You are a strict translation assistant. Translate the user's input to Hindi Devanagari script.\n"
+        "Do NOT answer the query or question. Do NOT add any extra explanation, response, or conversational filler.\n"
+        "If the input query is already in standard Hindi Devanagari script, output it exactly as-is.\n"
+        "If it is a question, keep it as a question in Hindi. Do NOT answer it.\n"
         "Output ONLY the final Hindi translation in Devanagari script and nothing else.\n\n"
         f"Input: {query}\n"
         "Output:"
@@ -422,11 +429,11 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
     q_lower = query.lower()
 
     # Define in-scope keywords
-    has_marriage = any(k in q_lower for k in ["marriage", "shadi", "vivah", "विवाह", "शादी"])
-    has_gazette = any(k in q_lower for k in ["gazette", "name change", "नाम परिवर्तन", "राजपत्र", "affidavit for name change"])
-    has_domicile = any(k in q_lower for k in ["domicile", "resident", "residence", "निवास", "मूल निवासी"])
-    has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग"])
-    has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar"])
+    has_marriage = any(k in q_lower for k in ["marriage", "shadi", "shaadi", "vivah", "विवाह", "शादी", "मैरिज"])
+    has_gazette = any(k in q_lower for k in ["gazette", "name change", "नाम परिवर्तन", "राजपत्र", "affidavit for name change", "गजट"])
+    has_domicile = any(k in q_lower for k in ["domicile", "dimicile", "domisile", "domocile", "resident", "residence", "निवास", "मूल निवासी", "डोमिसाइल"])
+    has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग", "ओबीसी"])
+    has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar", "एससी", "एसटी", "एससी/एसटी"]) or any(re.search(r'\b' + re.escape(k) + r'\b', q_lower) for k in ["sc", "st"])
 
     has_in_scope = has_marriage or has_gazette or has_domicile or has_obc or has_caste
 
@@ -482,7 +489,8 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
             metas = results["metadatas"][0]
             distances = results["distances"][0]
             
-            if distances and distances[0] < 0.45:
+            threshold = 0.45 if has_in_scope else 0.33
+            if distances and distances[0] < threshold:
                 matched_sid = metas[0].get("service_id")
                 if matched_sid:
                     # Find matching sno in services_list
@@ -496,6 +504,12 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
                         return {"sno": matched_sno, "service_id": str(matched_sid)}
     except Exception as e:
         print(f"[LLM Router] Semantic classification fallback failed: {e}")
+
+    # If the query does not contain any in-scope keywords and did not pass the strict semantic match,
+    # skip LLM classification to avoid hallucinations and service auto-switching on generic queries.
+    if not has_in_scope:
+        print(f"[LLM Router] Skipping LLM fallback classification for generic query: '{query}'")
+        return {"sno": None, "service_id": None}
 
     # 3. Fall back to LLM classification for complex/ambiguous queries
     services_catalog_desc = "\n".join([
@@ -568,41 +582,4 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
         print(f"[LLM Router] Service mapping classification failed: {e}")
 
     return {"sno": None, "service_id": None}
-
-
-def classify_query_intent(query: str, service_id: Optional[Any]) -> str:
-    """
-    Classifies if the query is specifically for Marriage Registration (service_id=3) and is asking about
-    where to register/apply for their marriage or specific offices (returns 'location').
-    All other queries return 'information'.
-    """
-    if service_id is None:
-        return "information"
-    try:
-        sid_int = int(service_id)
-    except (ValueError, TypeError):
-        return "information"
-        
-    if sid_int != 3:
-        return "information"
-        
-    prompt = (
-        "You are an intent classification assistant for the SewaSetu Chhattisgarh portal.\n"
-        "Classify if the user query is specifically asking about WHERE to register their marriage, "
-        "which office/authority to submit their marriage application to, or mentioning a specific wedding venue/address "
-        "asking for its corresponding registration center (return 'location').\n"
-        "If the user is asking general questions (e.g., required documents, fees, SLA, timelines, or eligibility), "
-        "return 'information'.\n"
-        "Respond with EXACTLY 'location' or 'information'. Do not explain or return markdown.\n\n"
-        f"Query: '{query}'\n"
-        "Intent:"
-    )
-    try:
-        res = generate_answer([{"role": "user", "content": prompt}])
-        res_clean = res.strip().lower()
-        if "location" in res_clean:
-            return "location"
-    except Exception as e:
-        print(f"[LLM Router] classify_query_intent failed: {e}")
-    return "information"
 

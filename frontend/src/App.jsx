@@ -194,11 +194,6 @@ function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
-  const [locationFlow, setLocationFlow] = useState(null);
-  const [originalQuery, setOriginalQuery] = useState(null);
-  const [activeServiceId, setActiveServiceId] = useState(null);
-  const [locationName, setLocationName] = useState('');
-  const [awaitingVenueInput, setAwaitingVenueInput] = useState(false);
 
   // References
   const messagesEndRef = useRef(null);
@@ -244,27 +239,24 @@ function App() {
     setChatMessages(newMessages);
     setIsChatLoading(true);
 
-    let activeSno = selectedSno || activeServiceId;
+    let activeSno = selectedSno;
 
-    // Call search API only if not in location flow
-    if (!locationFlow) {
-      try {
-        const searchRes = await fetch('/api/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query, language: lang })
-        });
-        if (searchRes.ok) {
-          const mapData = await searchRes.json();
-          if (mapData.sno) {
-            setSelectedSno(mapData.sno);
-            activeSno = mapData.sno;
-            setActiveServiceId(mapData.service_id);
-          }
+    // Call search API
+    try {
+      const searchRes = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, language: lang })
+      });
+      if (searchRes.ok) {
+        const mapData = await searchRes.json();
+        if (mapData.sno) {
+          setSelectedSno(mapData.sno);
+          activeSno = mapData.sno;
         }
-      } catch (err) {
-        console.warn(err);
       }
+    } catch (err) {
+      console.warn(err);
     }
 
     // Call chatbot endpoint
@@ -277,11 +269,6 @@ function App() {
         language: lang
       };
 
-      if (locationFlow) {
-        bodyPayload.location_flow = locationFlow;
-        bodyPayload.original_query = originalQuery;
-      }
-
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: chatHeaders,
@@ -290,162 +277,8 @@ function App() {
 
       if (res.ok) {
         const data = await res.json();
-        
-        // Reset location flow state after text submit
-        setLocationFlow(null);
-
-        // Update active states
-        if (data.original_query) {
-          setOriginalQuery(data.original_query);
-        }
-        if (data.service_id) {
-          setActiveServiceId(data.service_id);
-        }
-
         const newMsg = { role: 'assistant', content: data.response || data.reply };
-        if (data.options) {
-          newMsg.options = data.options;
-          newMsg.original_query = data.original_query;
-          newMsg.service_id = data.service_id;
-        }
         setChatMessages(prev => [...prev, newMsg]);
-      } else {
-        setChatMessages(prev => [...prev, { role: 'assistant', content: t.error_chat }]);
-        setLocationFlow(null);
-      }
-    } catch (err) {
-      setChatMessages(prev => [...prev, { role: 'assistant', content: t.error_chat }]);
-      setLocationFlow(null);
-    } finally {
-      setIsChatLoading(false);
-    }
-  };
-
-  const handleVenueSubmit = async () => {
-    if (!locationName.trim() || isChatLoading) return;
-
-    const typedLocation = locationName.trim();
-    setLocationName('');
-    setAwaitingVenueInput(false);
-
-    const nextMessages = [...chatMessages, { role: 'user', content: typedLocation }];
-    setChatMessages(nextMessages);
-    setIsChatLoading(true);
-
-    const activeSno = selectedSno || activeServiceId;
-
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: typedLocation,
-          location_name: typedLocation,
-          messages: nextMessages,
-          selected_sno: activeSno,
-          language: lang,
-          location_flow: 'flow_location',
-          original_query: originalQuery
-        })
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setLocationFlow(null);
-
-        if (data.original_query) {
-          setOriginalQuery(data.original_query);
-        }
-        if (data.service_id) {
-          setActiveServiceId(data.service_id);
-        }
-
-        const newMsgObj = { role: 'assistant', content: data.response || data.reply };
-        if (data.options) {
-          newMsgObj.options = data.options;
-          newMsgObj.original_query = data.original_query;
-          newMsgObj.service_id = data.service_id;
-        }
-
-        setChatMessages(prev => [...prev, newMsgObj]);
-      } else {
-        setChatMessages(prev => [...prev, { role: 'assistant', content: t.error_chat }]);
-        setLocationFlow(null);
-      }
-    } catch (err) {
-      setChatMessages(prev => [...prev, { role: 'assistant', content: t.error_chat }]);
-      setLocationFlow(null);
-    } finally {
-      setIsChatLoading(false);
-    }
-  };
-
-  const handleOptionClick = async (option, messageIndex) => {
-    // Disable option buttons
-    setChatMessages(prev => prev.map((msg, idx) => {
-      if (idx === messageIndex) {
-        return { ...msg, disabled: true };
-      }
-      return msg;
-    }));
-
-    const userQuery = option.label;
-    const flowValue = option.value;
-
-    if (flowValue === 'flow_location') {
-      const promptMsg = lang === 'hi'
-        ? "कृपया अपने विवाह स्थल या क्षेत्र का नाम दर्ज करें (जैसे, ग्राम का नाम, रिज़ॉर्ट का नाम, क्षेत्र):"
-        : "Please enter the name of your marriage venue or locality (e.g., village name, resort name, area):";
-
-      setChatMessages(prev => [
-        ...prev,
-        { role: 'user', content: userQuery },
-        { role: 'assistant', content: promptMsg }
-      ]);
-      setLocationFlow('flow_location');
-      setAwaitingVenueInput(true);
-      return;
-    }
-
-    const nextMessages = [...chatMessages, { role: 'user', content: userQuery }];
-    setChatMessages(nextMessages);
-    setIsChatLoading(true);
-
-    const activeSno = selectedSno || activeServiceId;
-
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: userQuery,
-          messages: nextMessages,
-          selected_sno: activeSno,
-          language: lang,
-          location_flow: flowValue,
-          original_query: originalQuery
-        })
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-
-        // Update active states
-        if (data.original_query) {
-          setOriginalQuery(data.original_query);
-        }
-        if (data.service_id) {
-          setActiveServiceId(data.service_id);
-        }
-
-        const newMsgObj = { role: 'assistant', content: data.response || data.reply };
-        if (data.options) {
-          newMsgObj.options = data.options;
-          newMsgObj.original_query = data.original_query;
-          newMsgObj.service_id = data.service_id;
-        }
-
-        setChatMessages(prev => [...prev, newMsgObj]);
       } else {
         setChatMessages(prev => [...prev, { role: 'assistant', content: t.error_chat }]);
       }
@@ -538,20 +371,7 @@ function App() {
               <div key={index} className={`message-row ${msg.role}`}>
                 <div className="message-bubble">
                   {msg.role === 'user' ? msg.content : parseMarkdown(msg.content)}
-                  {msg.options && msg.options.length > 0 && (
-                    <div className="message-options-container">
-                      {msg.options.map((opt, oIdx) => (
-                        <button
-                          key={oIdx}
-                          className="option-btn"
-                          disabled={msg.disabled}
-                          onClick={() => handleOptionClick(opt, index)}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+
                 </div>
               </div>
             ))
@@ -571,54 +391,26 @@ function App() {
         </div>
 
         <div className="chat-input-container">
-          {awaitingVenueInput ? (
-            <div className="venue-input-box" style={{ display: 'flex', gap: '8px', width: '100%', padding: '8px' }}>
-              <input 
-                type="text"
-                className="search-input"
-                style={{ flex: 1, margin: 0, padding: '10px 14px' }}
-                placeholder={lang === 'hi' ? "विवाह स्थल या क्षेत्र का नाम दर्ज करें (उदा. ग्राम, रिसॉर्ट का नाम)..." : "Enter marriage venue or locality (e.g. resort name, village)..."}
-                value={locationName}
-                onChange={(e) => setLocationName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleVenueSubmit();
-                  }
-                }}
-              />
-              <button 
-                type="button" 
-                className="chat-send-btn" 
-                style={{ borderRadius: '8px', padding: '0 16px' }}
-                disabled={!locationName.trim() || isChatLoading}
-                onClick={handleVenueSubmit}
-              >
-                {lang === 'hi' ? 'खोजें' : 'Search'}
-              </button>
-            </div>
-          ) : (
-            <form className="chat-input-form" onSubmit={handleSendMessage}>
-              <textarea 
-                className="chat-textarea" 
-                placeholder={t.input_placeholder} 
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage();
-                  }
-                }}
-              />
-              <button type="submit" className="chat-send-btn" disabled={!inputText.trim() || isChatLoading}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="22" y1="2" x2="11" y2="13"></line>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                </svg>
-              </button>
-            </form>
-          )}
+          <form className="chat-input-form" onSubmit={handleSendMessage}>
+            <textarea 
+              className="chat-textarea" 
+              placeholder={t.input_placeholder} 
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage();
+                }
+              }}
+            />
+            <button type="submit" className="chat-send-btn" disabled={!inputText.trim() || isChatLoading}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </form>
         </div>
       </main>
 

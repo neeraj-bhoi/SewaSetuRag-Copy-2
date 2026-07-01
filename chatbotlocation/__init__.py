@@ -1,1 +1,0 @@
-# Chatbot location microservice package.

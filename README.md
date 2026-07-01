@@ -61,11 +61,6 @@ graph TD
 * **Polite Tone Enforcement:** All system prompts require warm, respectful, citizen-friendly language. The LLM is forbidden from using harsh, dismissive, or discouraging phrasing.
 * **Hinglish Script Safety Net:** For Hinglish responses, a post-processing step detects any Devanagari character leakage and automatically re-converts the response to Roman-script Hinglish via a transliteration LLM call.
 
-### 6. Standalone Geospatial Resolution Microservice
-* **Venue Name Parser:** A preprocessing step (`parse_venue_and_locality()`) separates branded venue names from city/locality components before geocoding, handling dash-and-subtitle formats like "Jharokha - The Wedding Place, Bhilai" and stripping decorator keywords ("Resort", "Vatika", "Banquet Hall", etc.).
-* **Landmark Override Table:** Hardcoded coordinates for common Chhattisgarh marriage venues (Mayfair Lake Resort, Hyatt Raipur, Jharokha, Mana Camp, etc.) with fuzzy matching via `rapidfuzz.fuzz.token_set_ratio ≥ 75`.
-* **Cascaded Nominatim Strategy:** Three-attempt geocoding pipeline: (1) venue+locality combined, (2) locality-only fallback for unindexed venues, (3) existing fuzzy retry with simplified and parent locality queries.
-* **Confidence Scoring:** When a venue cannot be pinpointed (locality fallback used), `venue_resolved=False` flag sets a base confidence of 0.65 and appends a note: "Exact venue could not be pinpointed; jurisdiction resolved from {locality}."
 ---
 
 ## 📂 Project Directory Structure
@@ -75,15 +70,7 @@ SewaSetuRag/
 ├── backend/                             # Python FastAPI Backend
 │   ├── main.py                          # API router, request schemas, translation, response synthesis
 │   ├── rag.py                           # Vector search client, checklist pinning, custom hybrid reranker
-│   ├── llm_router.py                    # Sarvam AI API clients, service classifier, and HTTP retry wrapper
-│   └── location_service.py              # OpenStreetMap Nominatim integration & query parsing
-├── chatbotlocation/                     # Standalone Geospatial Resolution Microservice
-│   ├── main.py                          # FastAPI app with /chatbot/locate endpoint
-│   └── services/
-│       ├── geocoding_service.py          # Venue parser, landmark overrides, cascaded Nominatim pipeline
-│       ├── boundary_hierarchy_service.py # Overpass API boundary extraction & hierarchy resolution
-│       ├── confidence_scorer.py          # Composite confidence scoring with venue_resolved handling
-│       └── jurisdiction_classifier.py    # Administrative body type classification
+│   └── llm_router.py                    # Sarvam AI API clients, service classifier, and HTTP retry wrapper
 ├── frontend/                            # Vite-React Single Page Application
 │   ├── public/                          # Static assets and icons
 │   ├── src/
@@ -154,11 +141,7 @@ The system is configured using an `.env` file at the root.
    ```bash
    cp .env.example .env
    ```
-5. Start the Standalone Geospatial Resolution Microservice (runs on port 8001):
-   ```bash
-   python -m uvicorn chatbotlocation.main:app --host 127.0.0.1 --port 8001
-   ```
-6. Start the main FastAPI backend development server (runs on port 8000):
+5. Start the main FastAPI backend development server (runs on port 8000):
    ```bash
    python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
    ```

@@ -18,12 +18,7 @@ try:
         classify_service, 
         detect_query_language, 
         translate_query_to_english,
-        translate_query_to_hindi,
-        classify_query_intent
-    )
-    from backend.location_service import (
-        geocode_location,
-        extract_location_from_query
+        translate_query_to_hindi
     )
 except ImportError:
     from rag import retrieve_context
@@ -32,12 +27,7 @@ except ImportError:
         classify_service, 
         detect_query_language, 
         translate_query_to_english,
-        translate_query_to_hindi,
-        classify_query_intent
-    )
-    from location_service import (
-        geocode_location,
-        extract_location_from_query
+        translate_query_to_hindi
     )
 
 
@@ -123,11 +113,6 @@ class ChatRequest(BaseModel):
     lang: Optional[str] = None
     service_id: Optional[Any] = None
     conversation_history: Optional[List[Message]] = None
-    
-    # State Machine Flow variables
-    location_flow: Optional[str] = None # 'flow_location' or 'flow_info'
-    original_query: Optional[str] = None
-    location_name: Optional[str] = None
 
     # Frontend support schemas
     messages: Optional[List[Message]] = None
@@ -290,12 +275,19 @@ async def run_rag_pipeline_intermediates(query: str, request: ChatRequest, servi
                 "- Answer ONLY what the citizen asked. Do NOT volunteer extra information they did not request.\n"
                 "- If the citizen asks about eligibility, answer ONLY about eligibility. Do NOT add document lists, fees, timelines, or application process unless explicitly asked.\n"
                 "- If the citizen asks about documents, answer ONLY about documents. Do NOT add eligibility criteria, fees, or process steps.\n"
+                "- If the citizen asks a specific question about a single document (e.g., whether a specific document is mandatory/optional, or how to get it), answer ONLY that specific question about that single document. Do NOT output or dump the entire list of required documents or other unrelated documents.\n"
                 "- Keep your response focused and concise. A short, precise answer is always better than a long, unfocused one.\n\n"
+                "FORMATTING RULES:\n"
+                "- You MUST structure your answer using clean markdown, bold text highlights, and lists (bullet points or numbered lists).\n"
+                "- Avoid large, cluttered paragraphs of block text. Split your response into clear, logical sections with headings and line breaks.\n"
+                "- Even for short answers, organize the key takeaways into bullet points to ensure it is visually appealing, spaced out, and scan-friendly for the citizen.\n\n"
                 "STRICT FACTUAL GROUNDING:\n"
                 "- Read the context very carefully. Base your answer ONLY on what is stated in the context.\n"
                 "- ELIGIBILITY: If the context contains eligibility criteria, rules, or conditions, read ALL of them thoroughly before answering. "
-                "Pay special attention to alternative criteria, exceptions, and special cases (e.g., criteria for spouses, government employees, property holders). "
+                "Pay special attention to alternative criteria, exceptions, and special cases. "
+                "For Domicile eligibility, note that: Criteria One (A) and Criteria Two (B) must BOTH be met to get the certificate. Criteria Three (C) is a standalone alternative set of conditions (if Criteria Three is met, Criteria One and Two are NOT required). Thus, eligibility is achieved by: (Criteria One AND Criteria Two) OR (Criteria Three). Do NOT state that all three are required. "
                 "Do NOT assume ineligibility if there is ANY criterion in the context that could apply to the citizen's situation. Present all relevant criteria to the citizen.\n"
+                "- MARRIAGE JURISDICTION: For Marriage registration queries, always clarify that a marriage must be registered in the local area where it was solemnized/performed (not in the couple's hometown or place of residence), and with the appropriate local authority of that area (Gram Panchayat if rural; Municipality/Municipal Corporation if urban).\n"
                 "- DOCUMENTS: Determine the mandatory or optional status of any document ONLY from the 'REQUIRED DOCUMENTS' list in the context. "
                 "Do NOT infer mandatory status from User Manual text, official notification pages, or form guidelines. "
                 "If a document is listed with '(Mandatory: No)' or '(Mandatory: नहीं)', it is optional.\n\n"
@@ -326,12 +318,19 @@ async def run_rag_pipeline_intermediates(query: str, request: ChatRequest, servi
                 "- केवल वही उत्तर दें जो नागरिक ने पूछा है। अतिरिक्त जानकारी स्वयं से न जोड़ें।\n"
                 "- यदि नागरिक पात्रता के बारे में पूछे, तो केवल पात्रता का उत्तर दें। दस्तावेज सूची, शुल्क, समयसीमा या आवेदन प्रक्रिया न जोड़ें जब तक स्पष्ट रूप से न पूछा जाए।\n"
                 "- यदि नागरिक दस्तावेजों के बारे में पूछे, तो केवल दस्तावेजों का उत्तर दें।\n"
+                "- यदि नागरिक किसी एक दस्तावेज के बारे में विशिष्ट प्रश्न पूछता है (जैसे कि क्या कोई विशिष्ट दस्तावेज अनिवार्य/वैकल्पिक है, या इसे कैसे प्राप्त करें), तो केवल उसी विशिष्ट दस्तावेज के बारे में उत्तर दें। सभी आवश्यक दस्तावेजों या असंबंधित दस्तावेजों की पूरी सूची प्रदर्शित न करें।\n"
                 "- संक्षिप्त और सटीक उत्तर हमेशा लंबे और बिखरे उत्तर से बेहतर है।\n\n"
+                "प्रारूपण नियम (FORMATTING RULES):\n"
+                "- आपको अपने उत्तर को स्पष्ट मार्कडाउन, बोल्ड टेक्स्ट हाइलाइट्स और सूचियों (बुलेट पॉइंट या नंबर सूची) का उपयोग करके व्यवस्थित करना होगा।\n"
+                "- बड़े, अव्यवस्थित पैराग्राफ से बचें। अपने उत्तर को स्पष्ट शीर्षकों और लाइन ब्रेक के साथ तार्किक भागों में विभाजित करें।\n"
+                "- छोटे उत्तरों के लिए भी, मुख्य बातों को बुलेट पॉइंट में व्यवस्थित करें ताकि यह नागरिक के लिए पढ़ने में आसान और आकर्षक लगे।\n\n"
                 "सख्त तथ्यात्मक आधार:\n"
                 "- संदर्भ को बहुत ध्यान से पढ़ें। अपना उत्तर केवल संदर्भ में दी गई जानकारी पर आधारित करें।\n"
                 "- पात्रता: यदि संदर्भ में पात्रता मानदंड, नियम या शर्तें हैं, तो उत्तर देने से पहले सभी को अच्छी तरह पढ़ें। "
-                "वैकल्पिक मानदंडों, अपवादों और विशेष मामलों (जैसे पति/पत्नी, सरकारी कर्मचारी, संपत्ति धारकों के लिए मानदंड) पर विशेष ध्यान दें। "
+                "वैकल्पिक मानदंडों, अपवादों और विशेष मामलों पर विशेष ध्यान दें। "
+                "छत्तीसगढ़ मूल निवासी (Domicile) पात्रता के लिए, ध्यान दें: Criteria One (A) और Criteria Two (B) दोनों का पूरा होना अनिवार्य है। Criteria Three (C) एक वैकल्पिक (alternative) स्वतंत्र नियम है (यदि Criteria Three पूरा होता है, तो Criteria One और Two की आवश्यकता नहीं है)। इसलिए, पात्रता या तो (Criteria One AND Criteria Two) से या फिर (Criteria Three) से मिलती है। कभी भी यह न कहें कि तीनों मानदंडों को पूरा करना अनिवार्य है। "
                 "यदि संदर्भ में कोई भी मानदंड नागरिक की स्थिति पर लागू हो सकता है, तो अपात्रता न मानें।\n"
+                "- विवाह पंजीकरण क्षेत्र: विवाह पंजीकरण के प्रश्नों के लिए हमेशा स्पष्ट करें कि विवाह का पंजीकरण उसी स्थानीय क्षेत्र में होना चाहिए जहां वह संपन्न हुआ है (न कि वर-वधू के गृहनगर या निवास स्थान पर), और उसी क्षेत्र के उपयुक्त स्थानीय निकाय (ग्रामीण के लिए ग्राम पंचायत; शहरी के लिए नगर पालिका/नगर निगम) में होना चाहिए।\n"
                 "- दस्तावेज: किसी भी दस्तावेज की अनिवार्यता का निर्धारण केवल 'REQUIRED DOCUMENTS' या 'आवश्यक दस्तावेज' सूची से करें। "
                 "यदि कोई दस्तावेज '(Mandatory: नहीं)' या '(Mandatory: No)' के साथ सूचीबद्ध है, तो वह वैकल्पिक है।\n\n"
                 f"--- RETRIEVED CONTEXT (HINDI) ---\n{context_hi}\n--- END CONTEXT ---"
@@ -365,26 +364,11 @@ async def synthesize_consensus_response(
     hindi_answer: str,
     fallback_msg: str,
     request: ChatRequest,
-    service_id: Optional[int],
-    loc_details: Optional[Dict[str, Any]] = None,
-    is_location_flow: bool = False
+    service_id: Optional[int]
 ):
     """
     Synthesizes consensus response and post-processes URLs (async).
     """
-    # Bug 1 — Add a hard gate before calling the LLM synthesis
-    if is_location_flow and loc_details and loc_details.get("body_type") and loc_details.get("body_name"):
-        location_resolved = True
-        location_context = f"""
-The marriage venue has been SUCCESSFULLY resolved via geocoding.
-Administrative Body Type: {loc_details['body_type']}
-Administrative Body Name: {loc_details['body_name']}
-Area/Locality: {loc_details.get('area', 'N/A')}
-District: {loc_details.get('district', 'N/A')}
-"""
-    else:
-        location_resolved = False
-        location_context = "Geocoding was unsuccessful. Exact office could not be determined."
 
     # Consensus Synthesis to generate final response in the target language
     if query_lang == "en":
@@ -413,9 +397,10 @@ District: {loc_details.get('district', 'N/A')}
     elif query_lang == "hi":
         lang_label = "Hindi"
         lang_instruction = (
-            "You MUST respond ENTIRELY in Hindi using Devanagari script (देवनागरी लिपि). "
-            "Do NOT write in English or use Roman alphabet/Latin characters. "
-            "Every single word must be written in Devanagari."
+            "You MUST respond ENTIRELY in Hindi using Devanagari script (देवनागरी लिपि).\n"
+            "- Do NOT write in English or use Roman alphabet/Latin characters (a-z, A-Z).\n"
+            "- Every single word must be written in Devanagari.\n"
+            "- If the reference context contains English terms (such as 'affidavit', 'SC/ST certificate', 'mandatory', 'optional'), you MUST translate them to Hindi Devanagari (e.g. 'शपथ पत्र', 'एससी/एसटी प्रमाणपत्र', 'अनिवार्य', 'वैकल्पिक') in your final output. Do NOT leave English words in the Roman alphabet."
         )
         if hindi_answer and not re.search(r'[\u0900-\u097f]', hindi_answer) and hindi_answer.strip() not in ["Information not available.", "जानकारी उपलब्ध नहीं है।"]:
             try:
@@ -459,32 +444,7 @@ District: {loc_details.get('district', 'N/A')}
 
         rag_context = f"Reference Context Details:\n- {english_answer}\n- {translated_hindi_answer}"
 
-    if is_location_flow:
-        if location_resolved:
-            rule_1_sentence = f"\"Aapko {loc_details['body_name']} ({loc_details['body_type']}) mein apni shaadi register karni hogi.\""
-        else:
-            rule_1_sentence = "\"Aapko [body_name] ([body_type]) mein apni shaadi register karni hogi.\""
-
-        system_instruction = f"""You are SewaSetu AI Assistant. You MUST follow these rules strictly:
-
-RULE 1: If location_resolved is TRUE, your response MUST start by explicitly naming the exact administrative office:
-{rule_1_sentence}
-You are FORBIDDEN from saying the location could not be found if location_resolved is TRUE.
-
-RULE 2: If location_resolved is FALSE, only then say the exact office could not be determined and advise the user to contact their local authority.
-
-RULE 3: After the location statement, add the registration procedure, required documents list, and fee details from the context below.
-
-CRITICAL: You are strictly FORBIDDEN from mentioning or using technical terms like 'RAG-based', 'RAG', 'First Answer', 'Second Answer', 'Translated to English', 'Reference Context Details', 'location_resolved', or the synthesis process itself. Do not repeat intermediate headers. Answer naturally as a single consolidated assistance response that a normal user would want to hear.
-
-LOCATION DATA:
-{location_context}
-
-RAG CONTEXT:
-{rag_context}
-"""
-    else:
-        system_instruction = f"""You are SewaSetu AI Assistant — a polite, helpful, and empathetic government services assistant for the Chhattisgarh Sewa Setu portal.
+    system_instruction = f"""You are SewaSetu AI Assistant — a polite, helpful, and empathetic government services assistant for the Chhattisgarh Sewa Setu portal.
 Synthesize the provided information into a unified and consistent final response.
 - LANGUAGE AND SCRIPT RULES: {lang_instruction}
 
@@ -492,13 +452,22 @@ TONE RULES:
 - Always be warm, respectful, and citizen-friendly. You represent an official government portal.
 - NEVER use harsh, dismissive, blunt, or discouraging language.
 - When a citizen asks about eligibility, present ALL applicable criteria and exceptions from the context before drawing conclusions. If there is ANY criterion that could make them eligible, highlight it clearly and encouragingly.
+- ELIGIBILITY LOGIC RULE (Domicile): For Chhattisgarh Domicile Certificate eligibility, note that: Criteria One (A) and Criteria Two (B) must BOTH be met. Criteria Three (C) is a standalone alternative set of conditions (if Criteria Three is met, Criteria One and Two are NOT required). Thus, eligibility is achieved by: (Criteria One AND Criteria Two) OR (Criteria Three). Do NOT state that all three are required.
+- MARRIAGE JURISDICTION RULE: Under the Chhattisgarh Compulsory Registration of Marriages Rules, a marriage MUST be registered in the local area where the marriage was solemnized or performed, NOT at the couple's hometown or place of residence. The registrar is the Local Authority of that local area (Gram Panchayat if rural; Municipality or Municipal Corporation if urban). State this clearly when citizens ask where or under which office/authority to register their marriage.
 - Use supportive phrases like "Based on the rules, you may be eligible because...", "Please note this helpful provision...", "Here is what applies to your situation..." instead of flat refusals.
 
 CONCISENESS RULES:
 - Answer ONLY what the citizen asked. Do NOT volunteer extra information they did not request.
 - If the citizen asks about eligibility, answer ONLY about eligibility. Do NOT add document lists, fees, timelines, or application process unless explicitly asked.
 - If the citizen asks about documents, answer ONLY about documents. Do NOT add eligibility criteria, fees, or process steps.
+- If the citizen asks a specific question about a single document (e.g., whether a specific document is mandatory/optional, or how to get it), answer ONLY that specific question about that single document. Do NOT output or dump the entire list of required documents or other unrelated documents.
 - Keep your response focused and concise. A short, precise answer is always better than a long, unfocused one.
+
+FORMATTING RULES:
+- You MUST structure your final answer using clear sections, bold text highlights, and markdown lists (bullet points or numbered lists).
+- NEVER output large, blocky paragraphs of text.
+- Even for short answers, organize different key facts, steps, or rules into distinct bullet points.
+- Ensure the answer is visually clean, spaced out, and appealing to scan.
 
 CRITICAL: You are strictly FORBIDDEN from mentioning or using technical terms like 'RAG-based', 'RAG', 'First Answer', 'Second Answer', 'Translated to English', 'Reference Context Details', or the synthesis process itself. Do not repeat intermediate headers. Answer naturally as a single consolidated assistance response that a normal user would want to hear.
 
@@ -576,7 +545,7 @@ RAG CONTEXT:
     return {"response": final_reply}
 
 
-async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optional[int], loc_details: Optional[Dict[str, Any]] = None, is_location_flow: bool = False):
+async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optional[int]):
     """
     Consolidated RAG execution and response synthesis pipeline (Async).
     """
@@ -600,7 +569,7 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     return await synthesize_consensus_response(
         query, query_lang, english_query, hindi_query,
         context_en, context_hi, english_answer, hindi_answer, fallback_msg,
-        request, service_id, loc_details, is_location_flow
+        request, service_id
     )
 
 
@@ -647,78 +616,8 @@ async def chat_with_bot(request: ChatRequest):
         except Exception as e:
             print(f"[API Chat] Failed to auto-classify service: {e}")
 
-    # CASE 1: Initial user query (location_flow is None)
-    if not request.location_flow:
-        intent = classify_query_intent(query, service_id)
-        if intent == "location" and service_id == 3:
-            # Return interactive choices prompt in target language
-            query_lang = detect_query_language(query)
-            if query_lang == "hi":
-                reply_msg = "मुझे लगा कि आप अपनी शादी के पंजीकरण स्थान/कार्यालय के बारे में पूछ रहे हैं। क्या आप अपने विवाह स्थल/पते के आधार पर अपने विशिष्ट कार्यालय का पता लगाना चाहेंगे, या आप सामान्य जानकारी चाहते हैं?"
-            elif query_lang == "hinglish":
-                reply_msg = "Mujhe laga aap marriage registration office ke baare me puch rahe hain. Kya aap apne wedding venue/address ke basis par local office locate karna chahenge, ya general information chahte hain?"
-            else:
-                reply_msg = "I noticed you are asking about a registration location/office for your marriage. Would you like to locate your specific office based on your wedding venue/address, or do you want general information?"
-
-            return {
-                "response": reply_msg,
-                "options": [
-                    {"label": "📍 Find Local Office", "value": "flow_location"},
-                    {"label": "ℹ️ General Information", "value": "flow_info"}
-                ],
-                "original_query": query,
-                "service_id": service_id
-            }
-        else:
-            # Fall back to standard RAG pipeline
-            return await run_rag_pipeline(query, request, service_id, is_location_flow=False)
-
-    # CASE 2: User clicked 'General Information' (location_flow == 'flow_info')
-    if request.location_flow == "flow_info":
-        orig_query = request.original_query or query
-        return await run_rag_pipeline(orig_query, request, service_id, is_location_flow=False)
-
-    # CASE 3: User clicked 'Find Local Office' (location_flow == 'flow_location')
-    if request.location_flow == "flow_location":
-        orig_query = request.original_query or query
-        location_name = request.location_name
-        
-        # Initialize loc_details before operations
-        loc_details = {}
-        
-        # Extract the old venue from original query
-        old_venue = extract_location_from_query(orig_query)
-        
-        # Fallback to extraction if location_name is not provided directly
-        if not location_name:
-            location_name = old_venue
-            
-        # Update the query to refer to the new location name
-        if old_venue and location_name and old_venue.lower() != location_name.lower():
-            orig_query = re.sub(re.escape(old_venue), location_name, orig_query, flags=re.IGNORECASE)
-            print(f"[API Chat] Replaced old venue '{old_venue}' with new location '{location_name}' in query. New query: '{orig_query}'")
-        
-        try:
-            loc_details = geocode_location(location_name)
-        except Exception as e:
-            print(f"[API Chat] Geocoding exception: {e}")
-            loc_details = {}
-            
-        # Bug 3 — Add a debug log to verify loc_details content:
-        print(f"[DEBUG] loc_details resolved: {loc_details}")
-        
-        # Bug 4 — Verify loc_details is actually being passed into run_rag_pipeline:
-        result = await run_rag_pipeline(
-            query=orig_query,
-            request=request,
-            service_id=3,
-            loc_details=loc_details,
-            is_location_flow=True
-        )
-        return result
-
-    # Fallback to standard RAG
-    return await run_rag_pipeline(query, request, service_id, is_location_flow=False)
+    # Execute standard RAG pipeline directly (location flows removed)
+    return await run_rag_pipeline(query, request, service_id)
 
 
 @app.post("/api/search")

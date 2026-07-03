@@ -57,8 +57,10 @@ graph TD
 ### 5. Contextual Grounding & Response Quality
 * **RAG Context Injection:** Retrieved chunks are directly embedded into the LLM system prompts for both intermediate (English/Hindi) answer generation, ensuring the LLM is grounded on actual database content rather than its parametric knowledge.
 * **Eligibility Criteria Awareness:** The system prompts instruct the LLM to read ALL eligibility criteria, rules, and exceptions from the context before answering — including alternative criteria for spouses, government employees, property holders, and other special cases.
-* **Conciseness Enforcement:** The LLM is instructed to answer ONLY what the citizen asked, without volunteering unrelated information (e.g., not dumping document lists when only eligibility was asked).
+* **Conciseness Enforcement:** The LLM is instructed to answer ONLY what the citizen asked, without volunteering unrelated information (e.g., not dumping document lists when only eligibility was asked). Special conciseness rules apply to single-document queries (e.g. asking whether one specific document is mandatory), which prevent the model from dumping the entire document checklist.
 * **Polite Tone Enforcement:** All system prompts require warm, respectful, citizen-friendly language. The LLM is forbidden from using harsh, dismissive, or discouraging phrasing.
+* **Structured, Point-Based Layouts:** The LLM is strictly instructed to format all responses using bold markdown headings and bullet-point or numbered lists to prevent cluttered block text, keeping the interface clean and easy to scan.
+* **Script & Translation Integrity:** Enforces pure script output (standard English for English queries, and pure Devanagari Hindi for Hindi queries). English terms extracted from RAG context are translated into Hindi Devanagari inside the consensus phase instead of copying Roman text.
 * **Hinglish Script Safety Net:** For Hinglish responses, a post-processing step detects any Devanagari character leakage and automatically re-converts the response to Roman-script Hinglish via a transliteration LLM call.
 
 ---
@@ -184,20 +186,30 @@ If you want to update, re-extract, or overwrite the vector store database:
 
 ## 🧪 Automated Testing & Evaluation Suite
 
-We provide a specialized test framework to evaluate query classification routing and document checklist extraction.
+We provide specialized test frameworks to evaluate query classification routing, document checklist extraction, and multi-language response formats.
 
-### Execute Evaluation Runner
+### 1. Document Queries Evaluation Runner
 To verify the accuracy of the bot across 20 document-related test cases (covering English, Hindi, and Hinglish queries):
 ```bash
 python run_document_queries_evaluation.py
 ```
-
-This generates [document_queries_evaluation_report.md](file:///c:/Users/hp/Desktop/SewaSetuRag/document_queries_evaluation_report.md) showing:
+This generates `document_queries_evaluation_report.md` showing:
 * Language classifier validation.
 * Database query classification accuracy.
 * Context chunk pinning state checks.
 * LLM grounding and mandatory vs. optional checklist assertions.
 * Latency statistics.
+
+### 2. Comprehensive 50-Query Validation Runner
+To run a comprehensive test of 50 queries covering basic information, tough/detailed context specific questions (e.g. domicile eligibility and marriage registration location rules), and out-of-scope requests:
+```bash
+python scratch/run_50_tests.py
+```
+This progressively logs results after every question and saves the full audit report as [test_results.md](file:///c:/Users/hp/Desktop/SewaSetuRag%20-%20Copy%20%282%29/test_results.md) showing:
+* Response latencies.
+* Language detection accuracy.
+* Auto-mapped Service IDs.
+* Full bot responses in English, Hindi, and Hinglish.
 
 ---
 

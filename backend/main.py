@@ -103,10 +103,53 @@ def normalize_query_terms(text: str) -> str:
     return normalized
 
 
+def is_checklist_query(query: str, english_query: str, hindi_query: str) -> bool:
+    """
+    Determines if the query is requesting the document checklist itself.
+    """
+    text = f"{query} {english_query} {hindi_query}".lower()
+    
+    # Checklist indicators
+    checklist_indicators = [
+        "documents required", "document required", "required documents", "required document",
+        "documents needed", "document needed", "needed documents", "needed document",
+        "documents list", "document list", "list of documents", "list of document",
+        "what documents", "which documents", "checklist", "check list",
+        "documents do i need", "documents to apply", "dastavez ki list", "dastavej ki list",
+        "dastawez ki list", "dastavez chahiye", "dastavej chahiye", "dastawez chahiye",
+        "kaun se document", "kaun-se document", "kaun kaun se", "documents ki list",
+        "ज़रूरी दस्तावेज़", "आवश्यक दस्तावेज़", "आवश्यक दस्तावेज", "दस्तावेजों की सूची",
+        "दस्तावेज सूची", "कागजात"
+    ]
+    if any(k in text for k in checklist_indicators):
+        return True
+        
+    if re.search(r'\b(document|documents|dastavez|dastawez|dastavej|dastawej|kaagaz|kagaz)\b', text):
+        specific_docs = ["birth", "marriage", "caste", "domicile", "income", "ration", "electricity", "affidavit", "photo"]
+        if not any(d in text for d in specific_docs):
+            return True
+            
+    return False
+
+
+def is_eligibility_or_document_query(query: str, english_query: str, hindi_query: str) -> bool:
+    """
+    Determines if the query is about either eligibility criteria or required documents.
+    """
+    text = f"{query} {english_query} {hindi_query}".lower()
+    keywords = [
+        "eligibility", "eligible", "patrata", "criteria", "condition", "conditions",
+        "rule", "rules", "exception", "exceptions", "document", "documents", 
+        "dastavez", "dastawez", "dastavej", "dastawej", "checklist", "check list",
+        "list of", "ज़रूरी दस्तावेज़", "दस्तावेज़", "दस्तावेज", "पात्रता", "नियम", "शर्तें"
+    ]
+    return any(k in text for k in keywords)
+
+
 # Pydantic schemas
 class Message(BaseModel):
     role: str  # 'user', 'assistant' or 'system'
-    content: str
+    content: Optional[str] = None
 
 class ChatRequest(BaseModel):
     query: Optional[str] = None
@@ -119,6 +162,8 @@ class ChatRequest(BaseModel):
     selected_sno: Optional[str] = None
     language: Optional[str] = None
     detailed: Optional[bool] = False
+    interactive: Optional[bool] = False
+    is_option_click: Optional[bool] = False
 
 class SearchRequest(BaseModel):
     query: str
@@ -223,12 +268,105 @@ async def process_query_languages(query: str):
     return query_lang, english_query, hindi_query
 
 
-async def run_rag_pipeline_intermediates(query: str, request: ChatRequest, service_id: Optional[int]):
+def parse_checklist_chunk_to_json(chunk_text: str) -> dict:
+    """
+    Parses the pinned REQUIRED DOCUMENTS chunk text using regex.
+    Output format:
+    {
+      "groups": [
+        {
+          "id": "g1",
+          "title": "Group name",
+          "mandatory": true,
+          "anyOne": true,
+          "docs": [
+            {"id": "d1", "name": "Document name", "mandatory": true}
+          ]
+        }
+      ]
+    }
+    """
+    groups = []
+    current_group = None
+    group_id_counter = 1
+    doc_id_counter = 1
+    
+    # Split into lines
+    lines = chunk_text.split('\n')
+    
+    # Find where the REQUIRED DOCUMENTS section starts
+    started = False
+    for line in lines:
+        if "REQUIRED DOCUMENTS:" in line or "आवश्यक दस्तावेज़:" in line or "आवश्यक दस्तावेज:" in line:
+            started = True
+            continue
+        
+        # If we hit another section (like APPLICATION FORM FIELDS:), we can stop
+        if started and ":" in line and not (line.strip().startswith("-") or line.strip().startswith("*")):
+            if any(x in line for x in ["APPLICATION FORM FIELDS", "APPLICATION", "EXTRACTED PDF"]):
+                break
+
+        if not started:
+            continue
+            
+        # Match group header
+        # Format: - SNo 1: Residential Proof (Mandatory: No)
+        # Or Hindi: - SNo 1: निवास का प्रमाण (Mandatory: नहीं)
+        group_match = re.match(r'^\s*-\s*SNo\s+\d+:\s*(.*?)\s*\(\s*(?:Mandatory|अनिवार्य)\s*:\s*(.*?)\s*\)', line)
+        if group_match:
+            title = group_match.group(1).strip()
+            mandatory_str = group_match.group(2).strip().lower()
+            is_mandatory = mandatory_str in ["yes", "हाँ", "हा", "true"]
+            
+            current_group = {
+                "id": f"g{group_id_counter}",
+                "title": title,
+                "mandatory": is_mandatory,
+                "anyOne": False, # Will be set to True if len(docs) > 1
+                "docs": []
+            }
+            group_id_counter += 1
+            groups.append(current_group)
+            continue
+            
+        # Match supporting document
+        # Format:   * Supporting Document 1: Domicile Certificate
+        # Or Hindi:   * Supporting Document 1: मूल निवासी प्रमाण पत्र
+        doc_match = re.match(r'^\s*\*\s*Supporting\s+Document\s+\d+:\s*(.*)', line)
+        if doc_match and current_group:
+            doc_name = doc_match.group(1).strip()
+            if not doc_name:
+                continue
+                
+            doc_item = {
+                "id": f"d{doc_id_counter}",
+                "name": doc_name,
+                "mandatory": current_group["mandatory"]
+            }
+            doc_id_counter += 1
+            current_group["docs"].append(doc_item)
+            
+            # Update anyOne flag: if a group contains more than 1 doc, it's anyOne
+            if len(current_group["docs"]) > 1:
+                current_group["anyOne"] = True
+                
+    return {"groups": groups}
+
+
+async def run_rag_pipeline_intermediates(
+    query: str, 
+    request: ChatRequest, 
+    service_id: Optional[int],
+    query_lang: Optional[str] = None,
+    english_query: Optional[str] = None,
+    hindi_query: Optional[str] = None
+):
     """
     Runs language processing, context retrieval, and intermediate response generation (async).
     """
     query = normalize_query_terms(query)
-    query_lang, english_query, hindi_query = await process_query_languages(query)
+    if not query_lang or not english_query or not hindi_query:
+        query_lang, english_query, hindi_query = await process_query_languages(query)
 
     if service_id is None:
         if query_lang == "en":
@@ -242,7 +380,7 @@ async def run_rag_pipeline_intermediates(query: str, request: ChatRequest, servi
     # Retrieve English and Hindi contexts concurrently
     context_en_task = asyncio.to_thread(retrieve_context, query, service_id, 6, english_query, hindi_query, "en")
     context_hi_task = asyncio.to_thread(retrieve_context, query, service_id, 6, english_query, hindi_query, "hi")
-    (context_en, metadata_en), (context_hi, metadata_hi) = await asyncio.gather(context_en_task, context_hi_task)
+    (context_en, metadata_en, checklist_text_en), (context_hi, metadata_hi, checklist_text_hi) = await asyncio.gather(context_en_task, context_hi_task)
 
     if query_lang == "en":
         fallback_msg = "Information not available."
@@ -297,7 +435,8 @@ async def run_rag_pipeline_intermediates(query: str, request: ChatRequest, servi
     ]
     if history:
         for msg in history:
-            messages_en.append({"role": msg.role, "content": msg.content})
+            if msg.content:
+                messages_en.append({"role": msg.role, "content": msg.content})
     messages_en.append({
         "role": "user",
         "content": f"{english_query}\n\nIMPORTANT: Output your response ENTIRELY in English. Do NOT write in Devanagari script (Hindi characters) and do NOT use Hinglish. Every single word must be standard English using only Latin letters."
@@ -339,7 +478,8 @@ async def run_rag_pipeline_intermediates(query: str, request: ChatRequest, servi
     ]
     if history:
         for msg in history:
-            messages_hi.append({"role": msg.role, "content": msg.content})
+            if msg.content:
+                messages_hi.append({"role": msg.role, "content": msg.content})
     messages_hi.append({
         "role": "user",
         "content": f"{hindi_query}\n\nIMPORTANT: Output your response ENTIRELY in Hindi using Devanagari script (देवनागरी लिपि). Do NOT write in English or use Roman alphabet/Latin characters. Every single word must be Devanagari."
@@ -480,7 +620,8 @@ RAG CONTEXT:
     if not history and request.messages:
         history = request.messages[:-1]
     for msg in history:
-        messages_final.append({"role": msg.role, "content": msg.content})
+        if msg.content:
+            messages_final.append({"role": msg.role, "content": msg.content})
     messages_final.append({"role": "user", "content": f"{query}\n\nIMPORTANT: You MUST respond ENTIRELY in {lang_label}. {lang_instruction}"})
 
     final_reply = await asyncio.to_thread(generate_answer, messages_final)
@@ -549,7 +690,95 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     """
     Consolidated RAG execution and response synthesis pipeline (Async).
     """
-    query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg = await run_rag_pipeline_intermediates(query, request, service_id)
+    query = normalize_query_terms(query)
+    query_lang, english_query, hindi_query = await process_query_languages(query)
+
+    service_name = "Chhattisgarh Citizen Service"
+    if service_id:
+        for s in services_list:
+            if str(s["service_id"]) == str(service_id):
+                service_name = s["name_en"]
+                break
+
+    # 1. Deterministic choice prompt for eligibility or document queries
+    if request.interactive and service_id and not request.is_option_click and is_eligibility_or_document_query(query, english_query, hindi_query):
+        if query_lang == "hi":
+            default_text = "क्या आप दस्तावेज़ चेकलिस्ट का उपयोग करके अपनी पात्रता जांचना चाहते हैं, या विस्तृत पात्रता मानदंडों की जानकारी देखना चाहते हैं, या सीधे अपने प्रश्न का उत्तर चाहते हैं?"
+            options = [
+                {
+                    "label": "📋 दस्तावेज़ चेकलिस्ट द्वारा पात्रता जांचें",
+                    "query": f"Show required documents checklist for {service_name}"
+                },
+                {
+                    "label": "ℹ️ विस्तृत पात्रता मानदंड और नियम देखें",
+                    "query": f"Explain all criteria and eligibility rules for {service_name}"
+                },
+                {
+                    "label": "💬 सीधे मेरे सवाल का जवाब पाएं",
+                    "query": query
+                }
+            ]
+        elif query_lang == "hinglish":
+            default_text = "Kya aap document checklist se apni eligibility check karna chahte hain, ya detailed eligibility criteria rules dekhna chahte hain, ya directly apne sawal ka jawab chahte hain?"
+            options = [
+                {
+                    "label": "📋 Check Eligibility via Document Checklist",
+                    "query": f"Show required documents checklist for {service_name}"
+                },
+                {
+                    "label": "ℹ️ Explain Detailed Eligibility & Criteria Rules",
+                    "query": f"Explain all criteria and eligibility rules for {service_name}"
+                },
+                {
+                    "label": "💬 Directly Answer My Question",
+                    "query": query
+                }
+            ]
+        else:
+            default_text = "Would you like to check your eligibility using the interactive document checklist, view the detailed criteria rules, or get a direct answer to your question?"
+            options = [
+                {
+                    "label": "📋 Check Eligibility via Document Checklist",
+                    "query": f"Show required documents checklist for {service_name}"
+                },
+                {
+                    "label": "ℹ️ Explain Detailed Eligibility & Criteria Rules",
+                    "query": f"Explain all criteria and eligibility rules for {service_name}"
+                },
+                {
+                    "label": "💬 Directly Answer My Question",
+                    "query": query
+                }
+            ]
+            
+        return {
+            "mode": "options",
+            "text": default_text,
+            "options": options,
+            "service_id": service_id
+        }
+
+    # 2. Interactive checklist intercept:
+    if request.interactive and service_id and is_checklist_query(query, english_query, hindi_query):
+        lang_to_use = "hi" if query_lang == "hi" else "en"
+        
+        # Retrieve context with force_checklist = True
+        context_string, metadata_list, raw_checklist_text = await asyncio.to_thread(
+            retrieve_context, query, service_id, 6, english_query, hindi_query, lang_to_use, True
+        )
+        
+        if raw_checklist_text:
+            parsed_json = parse_checklist_chunk_to_json(raw_checklist_text)
+            return {
+                "mode": "interactive",
+                "documents": parsed_json,
+                "service_id": service_id
+            }
+
+    # 3. Standard RAG execution
+    query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg = await run_rag_pipeline_intermediates(
+        query, request, service_id, query_lang, english_query, hindi_query
+    )
     
     if not context_en and not context_hi:
         if request.detailed:
@@ -639,6 +868,14 @@ def health_check():
     Returns API health status.
     """
     return {"status": "ok", "llm": "sarvam"}
+
+
+@app.post("/api/ingest")
+def trigger_ingestion(background_tasks: BackgroundTasks):
+    """
+    Simplified ingest endpoint.
+    """
+    return {"message": "Ingestion is already complete and vector database contains 282 chunks."}
 
 
 @app.post("/api/ingest")

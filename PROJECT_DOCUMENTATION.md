@@ -85,6 +85,14 @@ The SewaSetu RAG Chatbot solves this by processing natural language queries and 
   - **Prompt-level:** Strong instructions with explicit examples of forbidden Devanagari characters and required Roman transliterations.
   - **Post-processing safety net:** After synthesis, a regex check detects any Devanagari character leakage (`[\u0900-\u097f]`). If detected, a second LLM call automatically transliterates the response to Roman script while preserving meaning and structure.
 
+### K. Structured, Point-Based Layouts
+* The LLM is strictly instructed to format all responses using bold markdown headings and bullet-point or numbered lists to prevent cluttered block text. This ensures clean visual spacing, scan-friendly sections, and high readability for citizens.
+
+### L. Pure Script Integrity & Document Conciseness
+* **Script Integrity:** To prevent mixing scripts, English terms present in the context (like `affidavit`, `mandatory`) are translated into Devanagari Hindi in Devanagari-mode outputs instead of copying Roman text.
+* **Document-Specific Conciseness:** When users ask a narrow question targeting a single document (e.g., whether it is mandatory), the LLM answers only that specific question and is prohibited from dumping the entire document checklist.
+* **Devanagari Transliterated Triggers:** Supports common Hindi abbreviations like `एससी`, `एसटी`, `ओबीसी`, `डोमिसाइल`, `मैरिज`, and `गजट` for reliable service auto-classification.
+
 ---
 
 ## 3. Architecture & Message Lifecycle
@@ -172,9 +180,21 @@ The ingestion pipeline populates the persistent vector database (`chroma_db/`) f
 2. **Semantic Chunking (`ingestion/chunker.py`):** Splits the raw texts into overlapping chunks, identifying service tables, headers, and metadata rules.
 3. **Embeddings Storage (`ingestion/embed_and_store.py`):** Encodes text chunks using `intfloat/multilingual-e5-large` and inserts them into ChromaDB with metadata filters (`service_id`, `lang`).
 
----
+## 7. Automated Testing & Verification
 
-No standalone location test suites are needed as the location-specific routing flow has been removed. Standard RAG responses can be tested interactively.
+The project provides robust testing suites to validate RAG accuracy, language detection, document checklist pinning, and boundary criteria handling.
+
+### A. Document Queries Evaluation Suite
+* **Script:** `run_document_queries_evaluation.py`
+* **Purpose:** Validates the RAG system across 20 document-related queries in English, Hindi, and Hinglish. It asserts correct language detection, context chunk routing, document status, and response latency. It writes an audit log to `document_queries_evaluation_report.md`.
+
+### B. Comprehensive 50-Query Validation Suite
+* **Script:** `scratch/run_50_tests.py`
+* **Purpose:** Runs 50 test cases covering basic portal information, tough context-specific conditions, and out-of-scope requests. It progressively commits the results to `test_results.md` after every query, allowing real-time audit verification.
+* **Coverage:**
+  - 1–20: Basic service info (fees, timeline, documents).
+  - 21–40: Tough context-specific scenarios (domicile eligibility logic, Raipur marriage registration jurisdiction, MP Reorganisation Act).
+  - 41–50: Out-of-scope queries (home loans, scholarships, weather) verifying correct language-specific fallback messages.
 
 ---
 

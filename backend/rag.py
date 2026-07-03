@@ -114,8 +114,9 @@ def retrieve_context(
     top_k: int = 6,
     english_query: Optional[str] = None,
     hindi_query: Optional[str] = None,
-    lang: str = "en"
-) -> Tuple[str, List[Dict[str, Any]]]:
+    lang: str = "en",
+    force_checklist: bool = False
+) -> Tuple[str, List[Dict[str, Any]], Optional[str]]:
     """
     Retrieves top_k target-language chunks from ChromaDB, reranks them, 
     and returns a structured context string from the top 4 chunks.
@@ -157,7 +158,7 @@ def retrieve_context(
             "field", "fields", "form field", "form fields", "application field", 
             "application fields", "form detail", "form details", "फ़ील्ड", "फील्ड", "कॉलम"
         ]
-        is_details_query = any(k in text_to_check for k in details_keywords)
+        is_details_query = any(k in text_to_check for k in details_keywords) or force_checklist
 
     where_clause = {"lang": lang}
     if service_id:
@@ -245,11 +246,15 @@ def retrieve_context(
     # We bypass this check if we have pinned a checklist chunk since it is definitely in-scope.
     if not checklist_chunk and top_4_chunks and top_4_chunks[0].get("hybrid_score", 0.0) < 0.35:
         print(f"[RAG] Warning: Top hybrid score {top_4_chunks[0].get('hybrid_score', 0.0):.4f} is below threshold 0.35. Treating as out-of-scope.")
-        return "", []
+        return "", [], None
 
     # Build structured context string with labels
     context_parts = []
     metadata_list = []
+    raw_checklist_text = None
+    if checklist_chunk:
+        raw_checklist_text = checklist_chunk["text"]
+
     for idx, chunk in enumerate(top_4_chunks):
         meta = chunk["metadata"]
         doc_type = meta.get("doc_type", "web")
@@ -271,4 +276,4 @@ def retrieve_context(
         metadata_list.append(meta)
 
     context_string = "\n".join(context_parts)
-    return context_string, metadata_list
+    return context_string, metadata_list, raw_checklist_text

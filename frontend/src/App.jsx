@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import './App.css';
+import DocumentChecklist from './components/DocumentChecklist';
 
 // Translation dictionary for English and Hindi support
 const translations = {
@@ -85,11 +86,11 @@ function parseMarkdown(text) {
           const btnText = match[1];
           const btnUrl = match[2];
           return (
-            <a 
-              key={`link-${index}`} 
-              href={btnUrl} 
-              target="_blank" 
-              rel="noreferrer" 
+            <a
+              key={`link-${index}`}
+              href={btnUrl}
+              target="_blank"
+              rel="noreferrer"
               className="chat-apply-btn"
               style={{
                 display: 'inline-flex',
@@ -114,7 +115,7 @@ function parseMarkdown(text) {
           );
         }
       }
-      
+
       // Parse bold text **Text**
       const boldParts = part.split(/\*\*(.*?)\*\*/g);
       return boldParts.map((bPart, bIndex) => {
@@ -228,25 +229,26 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isChatLoading]);
 
-  // Chat message submission
-  const handleSendMessage = async (e) => {
-    if (e) e.preventDefault();
-    if (!inputText.trim() || isChatLoading) return;
-
-    const query = inputText.trim();
-    setInputText('');
-    const newMessages = [...chatMessages, { role: 'user', content: query }];
-    setChatMessages(newMessages);
+  // Unified chat query submission
+  const submitChatQuery = async (queryText, userDisplayMessage = null, isOptionClick = false) => {
+    if (isChatLoading) return;
     setIsChatLoading(true);
+
+    const displayMsg = userDisplayMessage || queryText;
+    const userMsg = { role: 'user', content: displayMsg };
+    
+    // Update local state immediately
+    const updatedMessages = [...chatMessages, userMsg];
+    setChatMessages(updatedMessages);
 
     let activeSno = selectedSno;
 
-    // Call search API
+    // Call search API using queryText
     try {
       const searchRes = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, language: lang })
+        body: JSON.stringify({ query: queryText, language: lang })
       });
       if (searchRes.ok) {
         const mapData = await searchRes.json();
@@ -263,10 +265,21 @@ function App() {
     try {
       const chatHeaders = { 'Content-Type': 'application/json' };
 
+      // Format messages history cleanly for backend Message model validation
+      const messagesForBackend = [
+        ...chatMessages.map(msg => ({
+          role: msg.role,
+          content: msg.content || null
+        })),
+        { role: 'user', content: queryText }
+      ];
+
       const bodyPayload = {
-        messages: newMessages,
+        messages: messagesForBackend,
         selected_sno: activeSno,
-        language: lang
+        language: lang,
+        interactive: true,
+        is_option_click: isOptionClick
       };
 
       const res = await fetch('/api/chat', {
@@ -277,8 +290,27 @@ function App() {
 
       if (res.ok) {
         const data = await res.json();
-        const newMsg = { role: 'assistant', content: data.response || data.reply };
-        setChatMessages(prev => [...prev, newMsg]);
+        if (data.mode === "interactive") {
+          const newMsg = {
+            role: 'assistant',
+            type: 'interactive_checklist',
+            data: data.documents,
+            serviceId: data.service_id
+          };
+          setChatMessages(prev => [...prev, newMsg]);
+        } else if (data.mode === "options") {
+          const newMsg = {
+            role: 'assistant',
+            type: 'options',
+            content: data.text,
+            options: data.options,
+            serviceId: data.service_id
+          };
+          setChatMessages(prev => [...prev, newMsg]);
+        } else {
+          const newMsg = { role: 'assistant', content: data.response || data.reply };
+          setChatMessages(prev => [...prev, newMsg]);
+        }
       } else {
         setChatMessages(prev => [...prev, { role: 'assistant', content: t.error_chat }]);
       }
@@ -287,6 +319,19 @@ function App() {
     } finally {
       setIsChatLoading(false);
     }
+  };
+
+  const handleSendMessage = async (e) => {
+    if (e) e.preventDefault();
+    if (!inputText.trim() || isChatLoading) return;
+
+    const query = inputText.trim();
+    setInputText('');
+    await submitChatQuery(query);
+  };
+
+  const handleOptionClick = async (opt) => {
+    await submitChatQuery(opt.query, opt.label, true);
   };
 
   // Filters for directory list
@@ -316,10 +361,10 @@ function App() {
           </div>
 
           <div className="search-container">
-            <input 
-              type="text" 
-              className="search-input" 
-              placeholder={t.search_placeholder} 
+            <input
+              type="text"
+              className="search-input"
+              placeholder={t.search_placeholder}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -329,8 +374,8 @@ function App() {
         <div className="services-list-container">
           <h2 className="directory-title">{t.directory_title} ({filteredServices.length})</h2>
           {filteredServices.map((srv) => (
-            <div 
-              key={srv.sno} 
+            <div
+              key={srv.sno}
               className={`service-item ${selectedSno === srv.sno ? 'active' : ''}`}
               onClick={() => setSelectedSno(srv.sno)}
             >
@@ -370,8 +415,31 @@ function App() {
             chatMessages.map((msg, index) => (
               <div key={index} className={`message-row ${msg.role}`}>
                 <div className="message-bubble">
-                  {msg.role === 'user' ? msg.content : parseMarkdown(msg.content)}
-
+                  {msg.role === 'user' ? (
+                    msg.content
+                  ) : msg.type === 'interactive_checklist' ? (
+                    <DocumentChecklist groups={msg.data.groups} serviceId={msg.serviceId} />
+                  ) : msg.type === 'options' ? (
+                    <div>
+                      <div className="options-text">
+                        {parseMarkdown(msg.content)}
+                      </div>
+                      <div className="options-buttons">
+                        {msg.options && msg.options.map((opt, idx) => (
+                          <button
+                            key={idx}
+                            className="option-btn"
+                            onClick={() => handleOptionClick(opt)}
+                          >
+                            <span>{opt.label}</span>
+                            <span className="option-btn-arrow">➔</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    parseMarkdown(msg.content)
+                  )}
                 </div>
               </div>
             ))
@@ -392,9 +460,9 @@ function App() {
 
         <div className="chat-input-container">
           <form className="chat-input-form" onSubmit={handleSendMessage}>
-            <textarea 
-              className="chat-textarea" 
-              placeholder={t.input_placeholder} 
+            <textarea
+              className="chat-textarea"
+              placeholder={t.input_placeholder}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={(e) => {

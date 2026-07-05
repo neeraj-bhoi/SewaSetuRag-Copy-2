@@ -428,12 +428,19 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
 
     q_lower = query.lower()
 
+    # Avoid calling LLM for very short generic inputs or greetings
+    greetings = {"hi", "hello", "hey", "ok", "okay", "yes", "no", "thanks", "thank you", "plz", "please", "help", "namaste", "नमस्ते", "हेलो", "बाय", "bye"}
+    words = set(q_lower.split())
+    if len(q_lower.strip()) < 3 or (len(words) == 1 and words.intersection(greetings)):
+        print(f"[LLM Router] Simple greeting or short query detected: '{query}'. Skipping classification.")
+        return {"sno": None, "service_id": None}
+
     # Define in-scope keywords
-    has_marriage = any(k in q_lower for k in ["marriage", "shadi", "shaadi", "vivah", "विवाह", "शादी", "मैरिज"])
-    has_gazette = any(k in q_lower for k in ["gazette", "name change", "नाम परिवर्तन", "राजपत्र", "affidavit for name change", "गजट"])
-    has_domicile = any(k in q_lower for k in ["domicile", "dimicile", "domisile", "domocile", "resident", "residence", "निवास", "मूल निवासी", "डोमिसाइल"])
-    has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग", "ओबीसी"])
-    has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar", "एससी", "एसटी", "एससी/एसटी"]) or any(re.search(r'\b' + re.escape(k) + r'\b', q_lower) for k in ["sc", "st"])
+    has_marriage = any(k in q_lower for k in ["marriage", "marrage", "mariage", "shadi", "shaadi", "vivah", "विवाह", "शादी", "मैरिज", "मॅरिज"])
+    has_gazette = any(k in q_lower for k in ["gazette", "gazzete", "gazzette", "gazet", "name change", "नाम परिवर्तन", "राजपत्र", "affidavit for name change", "गजट"])
+    has_domicile = any(k in q_lower for k in ["domicile", "domicil", "domiciel", "domicille", "dimicile", "domisile", "domisiel", "domocile", "domociel", "resident", "residence", "निवास", "मूल निवासी", "डोमिसाइल"])
+    has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग", "ओबीसी", "ओ.बी.सी."])
+    has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "cast", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar", "एससी", "एसटी", "एससी/एसटी"]) or any(re.search(r'\b' + re.escape(k) + r'\b', q_lower) for k in ["sc", "st"])
 
     has_in_scope = has_marriage or has_gazette or has_domicile or has_obc or has_caste
 
@@ -505,13 +512,7 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
     except Exception as e:
         print(f"[LLM Router] Semantic classification fallback failed: {e}")
 
-    # If the query does not contain any in-scope keywords and did not pass the strict semantic match,
-    # skip LLM classification to avoid hallucinations and service auto-switching on generic queries.
-    if not has_in_scope:
-        print(f"[LLM Router] Skipping LLM fallback classification for generic query: '{query}'")
-        return {"sno": None, "service_id": None}
-
-    # 3. Fall back to LLM classification for complex/ambiguous queries
+    # 3. Fall back to LLM classification for complex/ambiguous queries or queries with spelling typos
     services_catalog_desc = "\n".join([
         f"{s['sno']}. Serial Number {s['sno']} (Service ID: {s['service_id']}): {s['name_en']} | {s['name_hi']}"
         for s in services_list
@@ -583,3 +584,141 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
 
     return {"sno": None, "service_id": None}
 
+
+def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> Dict[str, str]:
+    """
+    Classifies a user query as 'greeting', 'follow_up', or 'new_topic' based on conversation history.
+    For follow-ups, rewrites the query into a self-contained form.
+    
+    Returns:
+        {
+            "intent": "greeting" | "follow_up" | "new_topic",
+            "resolved_query": "the self-contained rewritten query (or original if new_topic/greeting)",
+            "topic_summary": "1-line summary of what the conversation is about"
+        }
+    """
+    if not query:
+        return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
+
+    # Fast rule-based greeting detection (no LLM needed)
+    q_stripped = query.strip().lower()
+    # Remove trailing punctuation for matching
+    q_clean = re.sub(r'[!?.,।\s]+$', '', q_stripped)
+    
+    greeting_patterns = {
+        # English greetings
+        "hi", "hello", "hey", "hii", "hiii", "helloo", "hellooo",
+        "good morning", "good afternoon", "good evening", "good night",
+        # English farewells
+        "bye", "byee", "goodbye", "good bye", "see you", "take care",
+        # English thanks
+        "thanks", "thank you", "thankyou", "thank u", "thnx", "thnks", "ty",
+        # English pleasantries
+        "ok", "okay", "okk", "okkk", "yes", "no", "hmm", "hmmm",
+        "please", "plz", "pls",
+        # Hindi greetings (Devanagari)
+        "नमस्ते", "नमस्कार", "हेलो", "हाय", "हैलो",
+        # Hindi farewells
+        "अलविदा", "बाय", "धन्यवाद", "शुक्रिया",
+        # Hindi pleasantries
+        "जी", "जी हाँ", "जी नहीं", "हाँ", "नहीं", "ठीक है", "ठीक",
+        # Hinglish greetings
+        "namaste", "namaskar", "namaskaar", "pranam",
+        "dhanyavaad", "dhanyawad", "shukriya", "alvida",
+        "haan", "nahi", "nhi", "theek hai", "thik hai",
+        "acha", "accha", "achha"
+    }
+    
+    if q_clean in greeting_patterns:
+        return {"intent": "greeting", "resolved_query": query, "topic_summary": ""}
+
+    # If no history, it's definitely a new topic — no need for LLM call
+    if not recent_history or len(recent_history) == 0:
+        return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
+
+    # Build a compact history string for the LLM
+    history_str = ""
+    for msg in recent_history[-4:]:  # Last 2 turns max
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if content:
+            # Truncate long assistant responses to save tokens
+            if role == "assistant" and len(content) > 200:
+                content = content[:200] + "..."
+            history_str += f"{role.upper()}: {content}\n"
+
+    prompt = (
+        "You are a query classifier for a government services chatbot. Given a conversation history and the user's latest query, classify the intent and produce a self-contained resolved query.\n\n"
+        "RECENCY RULE (HIGHEST PRIORITY):\n"
+        "The MOST RECENT service/topic in the conversation is the current context. When a user's query refers to something implicitly (e.g., 'the cost', 'its documents', 'how long'), they are ALWAYS referring to the MOST RECENT service discussed — never an older one.\n\n"
+        "CLASSIFICATION RULES:\n"
+        "1. new_topic: The query mentions or names a DIFFERENT service/certificate/scheme than the MOST RECENT one in history. This applies even with connective words like 'aur' (and), 'what about', 'how about', 'bhi' (also).\n"
+        "2. follow_up: The query asks about the SAME service as the MOST RECENT one in history — either a different aspect (fees, documents, eligibility, timeline) or a correction/clarification of the previous answer.\n\n"
+        "RESOLVED QUERY RULES (applies to BOTH intents):\n"
+        "- ALWAYS produce a fully self-contained resolved_query that includes the service name AND the specific aspect.\n"
+        "- For follow_up: Replace pronouns/implicit references with the MOST RECENT service name from history.\n"
+        "- For new_topic with aspect carry-over: If the query is short and references a new service but the ASPECT is implied from the previous conversation (e.g., 'what about Service B?' after discussing fees of Service A), carry over the aspect into the resolved_query (e.g., 'what are the fees for Service B?').\n"
+        "- For new_topic that is fully self-contained: Keep the resolved_query as the original query.\n\n"
+        f"CONVERSATION HISTORY:\n{history_str}\n"
+        f"LATEST USER QUERY: {query}\n\n"
+        "Respond with ONLY a JSON object (no markdown, no code fences, no explanation):\n"
+        '{"intent": "follow_up" or "new_topic", "resolved_query": "fully self-contained rewritten query with service name and aspect", "topic_summary": "1-line summary"}\n'
+        "JSON:"
+    )
+
+
+
+
+    try:
+        headers = {
+            "api-subscription-key": sarvam_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": sarvam_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": 256,
+            "reasoning_effort": None
+        }
+        
+        print(f"[LLM Router] Classifying query intent...")
+        res = _post_with_retry(sarvam_api_url, headers=headers, json_payload=payload, timeout=30)
+        if res.status_code == 200:
+            choices = res.json().get("choices", [])
+            reply = ""
+            if choices:
+                message_obj = choices[0].get("message", {})
+                reply = message_obj.get("content") or ""
+            
+            # Strip reasoning tags
+            stripper = ThinkStripper()
+            reply = (stripper.feed(reply) + stripper.flush()).strip()
+            
+            print(f"[LLM Router] Intent classification raw reply: '{reply}'")
+            
+            json_match = re.search(r'\{.*?\}', reply, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group(0))
+                intent = result.get("intent", "new_topic")
+                resolved = result.get("resolved_query", query)
+                summary = result.get("topic_summary", "")
+                
+                # Validate intent value
+                if intent not in ("follow_up", "new_topic", "greeting"):
+                    intent = "new_topic"
+                
+                # Safety: if resolved_query is empty, fall back to original
+                if not resolved or not resolved.strip():
+                    resolved = query
+                
+                print(f"[LLM Router] Intent: {intent}, Resolved: '{resolved}', Summary: '{summary}'")
+                return {"intent": intent, "resolved_query": resolved, "topic_summary": summary}
+        else:
+            print(f"[LLM Router] Intent classification failed with status {res.status_code}")
+    except Exception as e:
+        print(f"[LLM Router] Intent classification error: {e}")
+    
+    # Fallback: treat as new topic
+    return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}

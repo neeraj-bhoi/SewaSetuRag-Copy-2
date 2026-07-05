@@ -18,7 +18,8 @@ try:
         classify_service, 
         detect_query_language, 
         translate_query_to_english,
-        translate_query_to_hindi
+        translate_query_to_hindi,
+        classify_query_intent
     )
 except ImportError:
     from rag import retrieve_context
@@ -27,7 +28,8 @@ except ImportError:
         classify_service, 
         detect_query_language, 
         translate_query_to_english,
-        translate_query_to_hindi
+        translate_query_to_hindi,
+        classify_query_intent
     )
 
 
@@ -101,6 +103,135 @@ def normalize_query_terms(text: str) -> str:
     normalized = re.sub(r'\b(samay seema|samay sima|kitne din|kitna samay)\b', 'time limit', normalized, flags=re.IGNORECASE)
     
     return normalized
+
+
+def detect_greeting(query: str) -> Optional[dict]:
+    """
+    Detects if the query is a greeting/salutation and returns a warm response.
+    Returns None if the query is not a greeting.
+    Returns {"response": "..."} if it is a greeting.
+    """
+    q_clean = re.sub(r'[!?.,।\s]+$', '', query.strip().lower())
+    
+    # Greeting responses by category
+    hello_patterns = {
+        "hi", "hello", "hey", "hii", "hiii", "helloo", "hellooo",
+        "good morning", "good afternoon", "good evening"
+    }
+    hello_patterns_hi = {"नमस्ते", "नमस्कार", "हेलो", "हाय", "हैलो"}
+    hello_patterns_hinglish = {"namaste", "namaskar", "namaskaar", "pranam"}
+    
+    bye_patterns = {"bye", "byee", "goodbye", "good bye", "see you", "take care", "good night"}
+    bye_patterns_hi = {"अलविदा", "बाय"}
+    bye_patterns_hinglish = {"alvida"}
+    
+    thanks_patterns = {"thanks", "thank you", "thankyou", "thank u", "thnx", "thnks", "ty"}
+    thanks_patterns_hi = {"धन्यवाद", "शुक्रिया"}
+    thanks_patterns_hinglish = {"dhanyavaad", "dhanyawad", "shukriya"}
+    
+    ok_patterns = {"ok", "okay", "okk", "okkk", "hmm", "hmmm"}
+    ok_patterns_hi = {"ठीक है", "ठीक", "जी", "जी हाँ", "हाँ"}
+    ok_patterns_hinglish = {"haan", "theek hai", "thik hai", "acha", "accha", "achha"}
+    
+    # Detect language for response
+    is_hindi = any('\u0900' <= c <= '\u097f' for c in query)
+    
+    if q_clean in hello_patterns:
+        return {"response": "Hello! 🙏 Welcome to SewaSetu AI Assistant. How can I help you with Chhattisgarh government services today? You can ask about documents, fees, eligibility, or application process for any service."}
+    elif q_clean in hello_patterns_hi:
+        return {"response": "नमस्ते! 🙏 सेवासेतु एआई सहायक में आपका स्वागत है। छत्तीसगढ़ सरकारी सेवाओं के बारे में मैं आपकी कैसे मदद कर सकता/सकती हूँ? आप किसी भी सेवा के दस्तावेज़, शुल्क, पात्रता या आवेदन प्रक्रिया के बारे में पूछ सकते हैं।"}
+    elif q_clean in hello_patterns_hinglish:
+        return {"response": "Namaste! 🙏 SewaSetu AI Assistant mein aapka swagat hai. Chhattisgarh sarkari sewaon ke baare mein main aapki kaise madad kar sakta/sakti hoon? Aap kisi bhi seva ke documents, fees, eligibility ya application process ke baare mein pooch sakte hain."}
+    
+    elif q_clean in bye_patterns:
+        return {"response": "Thank you for using SewaSetu! 🙏 Have a great day. Feel free to come back anytime you need help with government services."}
+    elif q_clean in bye_patterns_hi:
+        return {"response": "सेवासेतु का उपयोग करने के लिए धन्यवाद! 🙏 आपका दिन शुभ हो। सरकारी सेवाओं में मदद के लिए कभी भी वापस आएं।"}
+    elif q_clean in bye_patterns_hinglish:
+        return {"response": "SewaSetu use karne ke liye dhanyavaad! 🙏 Aapka din shubh ho. Sarkari sewaon mein madad ke liye kabhi bhi wapas aayein."}
+    
+    elif q_clean in thanks_patterns:
+        return {"response": "You're welcome! 🙏 Is there anything else I can help you with regarding Chhattisgarh government services?"}
+    elif q_clean in thanks_patterns_hi:
+        return {"response": "आपका स्वागत है! 🙏 क्या छत्तीसगढ़ सरकारी सेवाओं के बारे में कोई और मदद चाहिए?"}
+    elif q_clean in thanks_patterns_hinglish:
+        return {"response": "Aapka swagat hai! 🙏 Kya Chhattisgarh sarkari sewaon ke baare mein koi aur madad chahiye?"}
+    
+    elif q_clean in ok_patterns:
+        return {"response": "Alright! 👍 Let me know if you have any questions about Chhattisgarh government services."}
+    elif q_clean in ok_patterns_hi:
+        return {"response": "ठीक है! 👍 छत्तीसगढ़ सरकारी सेवाओं के बारे में कोई सवाल हो तो बताइए।"}
+    elif q_clean in ok_patterns_hinglish:
+        return {"response": "Theek hai! 👍 Chhattisgarh sarkari sewaon ke baare mein koi sawal ho toh bataiye."}
+    
+    return None
+
+
+def sanitize_history(messages: Optional[list]) -> list:
+    """
+    Cleans conversation history:
+    - Removes messages with empty/null content
+    - Removes special message types (interactive_checklist, options)
+    - Returns only valid user/assistant text messages
+    """
+    if not messages:
+        return []
+    
+    clean = []
+    for msg in messages:
+        # Handle both Pydantic Message objects and dicts
+        if hasattr(msg, 'content'):
+            content = msg.content
+            role = msg.role
+        elif isinstance(msg, dict):
+            content = msg.get('content')
+            role = msg.get('role', 'user')
+        else:
+            continue
+        
+        # Skip empty content
+        if not content or not content.strip():
+            continue
+        
+        # Skip system messages
+        if role == 'system':
+            continue
+        
+        # Only keep user and assistant roles
+        if role in ('user', 'assistant'):
+            clean.append({"role": role, "content": content.strip()})
+    
+    return clean
+
+
+def build_condensed_history(sanitized_history: list, is_follow_up: bool, topic_summary: str = "") -> list:
+    """
+    Builds a condensed history for the final synthesis stage only.
+    
+    - For follow-ups: includes last 2 turns + a topic summary line
+    - For new topics: returns empty (no history needed)
+    """
+    if not is_follow_up or not sanitized_history:
+        return []
+    
+    # Take only the last 4 messages (2 turns)
+    recent = sanitized_history[-4:]
+    
+    condensed = []
+    if topic_summary:
+        condensed.append({
+            "role": "system",
+            "content": f"Previous conversation context: {topic_summary}"
+        })
+    
+    for msg in recent:
+        content = msg["content"]
+        # Truncate long assistant responses to keep context focused
+        if msg["role"] == "assistant" and len(content) > 400:
+            content = content[:400] + "\n... (truncated for brevity)"
+        condensed.append({"role": msg["role"], "content": content})
+    
+    return condensed
 
 
 def is_checklist_query(query: str, english_query: str, hindi_query: str) -> bool:
@@ -392,94 +523,100 @@ async def run_rag_pipeline_intermediates(
     if not context_en and not context_hi:
         return query_lang, english_query, hindi_query, "", "", "Information not available.", "जानकारी उपलब्ध नहीं है।", fallback_msg
 
-    # Resolve history
-    history = request.conversation_history
-    if not history and request.messages:
-        history = request.messages[:-1]
+    # NOTE: NO history is passed to intermediate calls.
+    # History is only used in the final synthesis stage (condensed form).
+    # This prevents the triple-amplification problem.
 
-    # Generate Intermediate English Answer
+    # Build dynamic service-specific rules
+    service_rules_en = ""
+    service_rules_hi = ""
+    if service_id is not None:
+        if int(service_id) == 7:
+            service_rules_en = (
+                "- ELIGIBILITY (Domicile): If the citizen asks about eligibility or exceptions for Domicile Certificate, explain the rules strictly according to the context:\n"
+                "  1. Main Path (Both Criteria One AND Criteria Two must be met): The applicant must satisfy AT LEAST ONE option from Criteria One (Criteria A) AND AT LEAST ONE option from Criteria Two (Criteria B). You MUST list Criteria One and Criteria Two under separate, clearly-labeled headers or bullet points.\n"
+                "     * Criteria One (Criteria A) options: Birth in CG, parent resident for 25 years, parent is CG Government/PSU employee, or property in CG for 5 years.\n"
+                "     * Criteria Two (Criteria B) options: 3 years of school study in CG, or passing Class 5, 8, 10, 12 board exam from CG.\n"
+                "     * Never merge them into one list and never omit the education requirements of Criteria Two.\n"
+                "  2. Exceptions (Criteria Three / Criteria C): If they do not meet the Main Path (for example, if they lack 'Proof of 15 Years Stay' or did not study in CG), they are still eligible under the exceptions of Criteria Three (C). Under Criteria Three (C), Criteria A and B are NOT required. The exceptions are: (a) spouse is a domicile of CG, (b) applicant or spouse is a CG Government/PSU employee, or (c) applicant or parent is in All India Services and allotted CG Cadre.\n"
+                "  3. Clarity: Do NOT say that Criteria Three requires stay proof or education. Clearly explain that Criteria Three is a standalone set of exceptions that bypasses the need for the stay proof or CG education requirements of Criteria One and Two.\n"
+                "  Do NOT assume ineligibility if there is ANY criterion in the context that could apply to the citizen's situation. Present all relevant criteria to the citizen.\n"
+            )
+            service_rules_hi = (
+                "- पात्रता (Domicile Eligibility): यदि नागरिक मूल निवासी प्रमाण पत्र (Domicile) के लिए पात्रता या अपवादों के बारे में पूछता है, तो संदर्भ के आधार पर सख्ती से समझाएं:\n"
+                "  1. मुख्य मार्ग (Main Path): आवेदक को Criteria One (जिसे Criteria A भी कहा जाता है) से कम से कम एक विकल्प और Criteria Two (जिसे Criteria B भी कहा जाता है) से कम से कम एक विकल्प दोनों को पूरा करना होगा। आपको Criteria One और Criteria Two को अलग-अलग शीर्षकों (headers) या बुलेट पॉइंट्स के तहत सूचीबद्ध करना होगा।\n"
+                "     * Criteria One (Criteria A) के विकल्प: छत्तीसगढ़ में जन्म, माता-पिता का 25 वर्ष का निवास, माता-पिता का सरकारी/PSU कर्मचारी होना, या 5 वर्ष की संपत्ति होना।\n"
+                "     * Criteria Two (Criteria B) के विकल्प: CG में 3 वर्ष की स्कूल शिक्षा, या CG से 5वीं, 8वीं, 10वीं, 12वीं की बोर्ड परीक्षा उत्तीर्ण होना।\n"
+                "     * इन्हें कभी भी एक सूची में न मिलाएँ और Criteria Two (शिक्षा की आवश्यकता) के विकल्पों को कभी न छोड़ें।\n"
+                "  2. अपवाद (Criteria Three / Criteria C): यदि वे मुख्य मार्ग को पूरा नहीं करते हैं (उदाहरण के लिए, यदि उनके पास 15 वर्ष का निवास प्रमाण नहीं है या CG में पढ़ाई नहीं की है), तो भी वे Criteria Three (C) के अपवादों के तहत पात्र हैं। Criteria Three (C) के लिए Criteria A और B की आवश्यकता नहीं होती है। ये अपवाद हैं: (क) जीवनसाथी (spouse) छत्तीसगढ़ का मूल निवासी हो, (ख) आवेदक या जीवनसाथी छत्तीसगढ़ सरकार/PSU का कर्मचारी हो, या (ग) आवेदक या माता-पिता अखिल भारतीय सेवाओं (All India Services) में हों और उन्हें CG कैडर आवंटित किया गया हो।\n"
+                "  3. स्पष्टता: कभी भी यह न कहें कि Criteria Three के लिए निवास प्रमाण या शिक्षा की आवश्यकता है। स्पष्ट रूप से समझाएं कि Criteria Three एक स्वतंत्र अपवाद है जो Criteria One और Two (निवास प्रमाण और शिक्षा) की आवश्यकता को समाप्त करता है।\n"
+                "  यदि संदर्भ में कोई भी मानदंड नागरिक की स्थिति पर लागू हो सकता है, तो अपात्रता न मानें।\n"
+            )
+        elif int(service_id) == 3:
+            service_rules_en = (
+                "- MARRIAGE JURISDICTION: For Marriage registration queries, always clarify that a marriage must be registered in the local area where it was solemnized/performed (not in the couple's hometown or place of residence), and with the appropriate local authority of that area (Gram Panchayat if rural; Municipality/Municipal Corporation if urban).\n"
+            )
+            service_rules_hi = (
+                "- विवाह पंजीकरण क्षेत्र: विवाह पंजीकरण के प्रश्नों के लिए हमेशा स्पष्ट करें कि विवाह का पंजीकरण उसी स्थानीय क्षेत्र में होना चाहिए जहां वह संपन्न हुआ है (न कि वर-वधू के गृहनगर या निवास स्थान पर), और उसी क्षेत्र के उपयुक्त स्थानीय निकाय (ग्रामीण के लिए ग्राम पंचायत; शहरी के लिए नगर पालिका/नगर निगम) में होना चाहिए।\n"
+            )
+
+    # Generate Intermediate English Answer — NO HISTORY, only RAG context + query
     messages_en = [
         {
             "role": "system",
             "content": (
-                "You are a helpful, polite, and empathetic government services assistant for the Sewa Setu Chhattisgarh portal.\n"
-                "Answer the citizen's question using ONLY the provided English context.\n"
-                "Output your response ENTIRELY in English using only the Roman alphabet.\n\n"
-                "TONE AND CONDUCT RULES:\n"
-                "- Always be warm, respectful, and encouraging. You represent a government portal serving citizens.\n"
-                "- NEVER use harsh, dismissive, or discouraging language. Even when a citizen may not be eligible, guide them gently and highlight any alternative paths or exceptions that may apply.\n"
-                "- Use phrases like 'You may be eligible if...', 'Based on the rules, here is what applies to your situation...', 'Please note that...' instead of blunt refusals.\n\n"
-                "CONCISENESS RULES:\n"
-                "- Answer ONLY what the citizen asked. Do NOT volunteer extra information they did not request.\n"
-                "- If the citizen asks about eligibility, answer ONLY about eligibility. Do NOT add document lists, fees, timelines, or application process unless explicitly asked.\n"
-                "- If the citizen asks about documents, answer ONLY about documents. Do NOT add eligibility criteria, fees, or process steps.\n"
-                "- If the citizen asks a specific question about a single document (e.g., whether a specific document is mandatory/optional, or how to get it), answer ONLY that specific question about that single document. Do NOT output or dump the entire list of required documents or other unrelated documents.\n"
-                "- Keep your response focused and concise. A short, precise answer is always better than a long, unfocused one.\n\n"
-                "FORMATTING RULES:\n"
-                "- You MUST structure your answer using clean markdown, bold text highlights, and lists (bullet points or numbered lists).\n"
-                "- Avoid large, cluttered paragraphs of block text. Split your response into clear, logical sections with headings and line breaks.\n"
-                "- Even for short answers, organize the key takeaways into bullet points to ensure it is visually appealing, spaced out, and scan-friendly for the citizen.\n\n"
-                "STRICT FACTUAL GROUNDING:\n"
-                "- Read the context very carefully. Base your answer ONLY on what is stated in the context.\n"
-                "- ELIGIBILITY: If the context contains eligibility criteria, rules, or conditions, read ALL of them thoroughly before answering. "
-                "Pay special attention to alternative criteria, exceptions, and special cases. "
-                "For Domicile eligibility, note that: Criteria One (A) and Criteria Two (B) must BOTH be met to get the certificate. Criteria Three (C) is a standalone alternative set of conditions (if Criteria Three is met, Criteria One and Two are NOT required). Thus, eligibility is achieved by: (Criteria One AND Criteria Two) OR (Criteria Three). Do NOT state that all three are required. "
-                "Do NOT assume ineligibility if there is ANY criterion in the context that could apply to the citizen's situation. Present all relevant criteria to the citizen.\n"
-                "- MARRIAGE JURISDICTION: For Marriage registration queries, always clarify that a marriage must be registered in the local area where it was solemnized/performed (not in the couple's hometown or place of residence), and with the appropriate local authority of that area (Gram Panchayat if rural; Municipality/Municipal Corporation if urban).\n"
-                "- DOCUMENTS: Determine the mandatory or optional status of any document ONLY from the 'REQUIRED DOCUMENTS' list in the context. "
-                "Do NOT infer mandatory status from User Manual text, official notification pages, or form guidelines. "
-                "If a document is listed with '(Mandatory: No)' or '(Mandatory: नहीं)', it is optional.\n\n"
+                "STRICT ANSWER-ONLY RULE (HIGHEST PRIORITY):\n"
+                "Your ENTIRE response must address ONLY the specific question asked. Do NOT add ANY extra information.\n"
+                "- If asked about fees → respond ONLY with fee details. Do NOT mention documents, eligibility, process, or timelines.\n"
+                "- If asked about eligibility → respond ONLY with eligibility criteria. Do NOT mention documents, fees, process, or timelines.\n"
+                "- If asked about documents → respond ONLY with document information. Do NOT mention eligibility, fees, process, or timelines.\n"
+                "- If asked about timeline/SLA → respond ONLY with the timeline. Do NOT mention anything else.\n"
+                "- If asked about a single specific document → answer ONLY about that document. Do NOT list all documents.\n"
+                "Adding unrequested information is STRICTLY FORBIDDEN.\n\n"
+                "You are a polite government services assistant for the Sewa Setu Chhattisgarh portal.\n"
+                "Answer using ONLY the provided context. Output ENTIRELY in English (Roman alphabet only).\n"
+                "Be warm and respectful. Use markdown formatting with bullet points.\n"
+                f"{service_rules_en}"
+                "DOCUMENT RULES: Determine mandatory/optional status ONLY from 'REQUIRED DOCUMENTS' list. "
+                "If a document is '(Mandatory: Yes)' with no alternatives, clearly state it cannot be bypassed.\n"
+                "FEE INTERPRETATION RULE: When the context mentions 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee', these are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. "
+                "The total application fee is the fee for ONE method, not both added together. "
+                "If the citizen asks about total cost and the required documents mention any monetary costs (like challans, stamp paper fees, notarization fees), mention those as additional costs on top of the application fee.\n\n"
                 f"--- RETRIEVED CONTEXT (ENGLISH) ---\n{context_en}\n--- END CONTEXT ---"
             )
         }
     ]
-    if history:
-        for msg in history:
-            if msg.content:
-                messages_en.append({"role": msg.role, "content": msg.content})
+    # NO history appended — intermediate calls use only context + query
     messages_en.append({
         "role": "user",
         "content": f"{english_query}\n\nIMPORTANT: Output your response ENTIRELY in English. Do NOT write in Devanagari script (Hindi characters) and do NOT use Hinglish. Every single word must be standard English using only Latin letters."
     })
 
-    # Generate Intermediate Hindi Answer Messages (defined here to run in parallel)
+    # Generate Intermediate Hindi Answer — NO HISTORY, only RAG context + query
     messages_hi = [
         {
             "role": "system",
             "content": (
-                "You are a helpful, polite, and empathetic government services assistant for the Sewa Setu Chhattisgarh portal.\n"
-                "Answer the citizen's question using ONLY the provided Hindi context.\n"
-                "Output your response ENTIRELY in Hindi using Devanagari script (देवनागरी लिपि).\n\n"
-                "स्वर और आचरण नियम:\n"
-                "- हमेशा विनम्र, सम्मानजनक और सहानुभूतिपूर्ण रहें। आप एक सरकारी पोर्टल का प्रतिनिधित्व करते हैं।\n"
-                "- कभी भी कठोर, अपमानजनक या हतोत्साहित करने वाली भाषा का प्रयोग न करें। यदि नागरिक पात्र नहीं भी हो, तो भी उन्हें सौम्यता से मार्गदर्शन दें और कोई भी वैकल्पिक रास्ता या अपवाद बताएं।\n\n"
-                "संक्षिप्तता नियम:\n"
-                "- केवल वही उत्तर दें जो नागरिक ने पूछा है। अतिरिक्त जानकारी स्वयं से न जोड़ें।\n"
-                "- यदि नागरिक पात्रता के बारे में पूछे, तो केवल पात्रता का उत्तर दें। दस्तावेज सूची, शुल्क, समयसीमा या आवेदन प्रक्रिया न जोड़ें जब तक स्पष्ट रूप से न पूछा जाए।\n"
-                "- यदि नागरिक दस्तावेजों के बारे में पूछे, तो केवल दस्तावेजों का उत्तर दें।\n"
-                "- यदि नागरिक किसी एक दस्तावेज के बारे में विशिष्ट प्रश्न पूछता है (जैसे कि क्या कोई विशिष्ट दस्तावेज अनिवार्य/वैकल्पिक है, या इसे कैसे प्राप्त करें), तो केवल उसी विशिष्ट दस्तावेज के बारे में उत्तर दें। सभी आवश्यक दस्तावेजों या असंबंधित दस्तावेजों की पूरी सूची प्रदर्शित न करें।\n"
-                "- संक्षिप्त और सटीक उत्तर हमेशा लंबे और बिखरे उत्तर से बेहतर है।\n\n"
-                "प्रारूपण नियम (FORMATTING RULES):\n"
-                "- आपको अपने उत्तर को स्पष्ट मार्कडाउन, बोल्ड टेक्स्ट हाइलाइट्स और सूचियों (बुलेट पॉइंट या नंबर सूची) का उपयोग करके व्यवस्थित करना होगा।\n"
-                "- बड़े, अव्यवस्थित पैराग्राफ से बचें। अपने उत्तर को स्पष्ट शीर्षकों और लाइन ब्रेक के साथ तार्किक भागों में विभाजित करें।\n"
-                "- छोटे उत्तरों के लिए भी, मुख्य बातों को बुलेट पॉइंट में व्यवस्थित करें ताकि यह नागरिक के लिए पढ़ने में आसान और आकर्षक लगे।\n\n"
-                "सख्त तथ्यात्मक आधार:\n"
-                "- संदर्भ को बहुत ध्यान से पढ़ें। अपना उत्तर केवल संदर्भ में दी गई जानकारी पर आधारित करें।\n"
-                "- पात्रता: यदि संदर्भ में पात्रता मानदंड, नियम या शर्तें हैं, तो उत्तर देने से पहले सभी को अच्छी तरह पढ़ें। "
-                "वैकल्पिक मानदंडों, अपवादों और विशेष मामलों पर विशेष ध्यान दें। "
-                "छत्तीसगढ़ मूल निवासी (Domicile) पात्रता के लिए, ध्यान दें: Criteria One (A) और Criteria Two (B) दोनों का पूरा होना अनिवार्य है। Criteria Three (C) एक वैकल्पिक (alternative) स्वतंत्र नियम है (यदि Criteria Three पूरा होता है, तो Criteria One और Two की आवश्यकता नहीं है)। इसलिए, पात्रता या तो (Criteria One AND Criteria Two) से या फिर (Criteria Three) से मिलती है। कभी भी यह न कहें कि तीनों मानदंडों को पूरा करना अनिवार्य है। "
-                "यदि संदर्भ में कोई भी मानदंड नागरिक की स्थिति पर लागू हो सकता है, तो अपात्रता न मानें।\n"
-                "- विवाह पंजीकरण क्षेत्र: विवाह पंजीकरण के प्रश्नों के लिए हमेशा स्पष्ट करें कि विवाह का पंजीकरण उसी स्थानीय क्षेत्र में होना चाहिए जहां वह संपन्न हुआ है (न कि वर-वधू के गृहनगर या निवास स्थान पर), और उसी क्षेत्र के उपयुक्त स्थानीय निकाय (ग्रामीण के लिए ग्राम पंचायत; शहरी के लिए नगर पालिका/नगर निगम) में होना चाहिए।\n"
-                "- दस्तावेज: किसी भी दस्तावेज की अनिवार्यता का निर्धारण केवल 'REQUIRED DOCUMENTS' या 'आवश्यक दस्तावेज' सूची से करें। "
-                "यदि कोई दस्तावेज '(Mandatory: नहीं)' या '(Mandatory: No)' के साथ सूचीबद्ध है, तो वह वैकल्पिक है।\n\n"
+                "सख्त उत्तर-मात्र नियम (सर्वोच्च प्राथमिकता):\n"
+                "आपका पूरा उत्तर केवल पूछे गए प्रश्न का ही होना चाहिए। कोई भी अतिरिक्त जानकारी न जोड़ें।\n"
+                "- शुल्क पूछा गया → केवल शुल्क बताएं। दस्तावेज, पात्रता, प्रक्रिया या समयसीमा न जोड़ें।\n"
+                "- पात्रता पूछी गई → केवल पात्रता बताएं। दस्तावेज, शुल्क, प्रक्रिया या समयसीमा न जोड़ें।\n"
+                "- दस्तावेज पूछे गए → केवल दस्तावेज बताएं। पात्रता, शुल्क, प्रक्रिया या समयसीमा न जोड़ें।\n"
+                "- एक विशिष्ट दस्तावेज पूछा गया → केवल उसी दस्तावेज के बारे में बताएं। पूरी सूची न दें।\n"
+                "अनावश्यक जानकारी जोड़ना सख्त वर्जित है।\n\n"
+                "आप सेवा सेतु छत्तीसगढ़ पोर्टल के सहायक हैं।\n"
+                "केवल संदर्भ की जानकारी से उत्तर दें। देवनागरी लिपि में उत्तर दें।\n"
+                "विनम्र रहें। मार्कडाउन और बुलेट पॉइंट का उपयोग करें।\n"
+                f"{service_rules_hi}"
+                "दस्तावेज नियम: अनिवार्यता केवल 'आवश्यक दस्तावेज' सूची से निर्धारित करें।\n"
+                "शुल्क व्याख्या नियम: जब संदर्भ में 'ऑनलाइन शुल्क/पोर्टल शुल्क' और 'कियोस्क शुल्क/केंद्र शुल्क' दोनों हों, तो ये वैकल्पिक भुगतान विधियां हैं (ऑनलाइन या कियोस्क पर), संचयी नहीं। "
+                "कुल आवेदन शुल्क एक विधि का शुल्क है, दोनों का जोड़ नहीं। "
+                "यदि नागरिक कुल लागत पूछे और आवश्यक दस्तावेजों में कोई मौद्रिक लागत (जैसे चालान, स्टांप पेपर, नोटरी शुल्क) हो, तो उन्हें अतिरिक्त लागत के रूप में बताएं।\n\n"
                 f"--- RETRIEVED CONTEXT (HINDI) ---\n{context_hi}\n--- END CONTEXT ---"
             )
         }
     ]
-    if history:
-        for msg in history:
-            if msg.content:
-                messages_hi.append({"role": msg.role, "content": msg.content})
+    # NO history appended — intermediate calls use only context + query
     messages_hi.append({
         "role": "user",
         "content": f"{hindi_query}\n\nIMPORTANT: Output your response ENTIRELY in Hindi using Devanagari script (देवनागरी लिपि). Do NOT write in English or use Roman alphabet/Latin characters. Every single word must be Devanagari."
@@ -492,7 +629,6 @@ async def run_rag_pipeline_intermediates(
 
     return query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg
 
-
 async def synthesize_consensus_response(
     query: str,
     query_lang: str,
@@ -504,10 +640,12 @@ async def synthesize_consensus_response(
     hindi_answer: str,
     fallback_msg: str,
     request: ChatRequest,
-    service_id: Optional[int]
+    service_id: Optional[int],
+    condensed_history: Optional[list] = None
 ):
     """
     Synthesizes consensus response and post-processes URLs (async).
+    Uses condensed history (last 2 turns only) instead of full raw history.
     """
 
     # Consensus Synthesis to generate final response in the target language
@@ -584,44 +722,56 @@ async def synthesize_consensus_response(
 
         rag_context = f"Reference Context Details:\n- {english_answer}\n- {translated_hindi_answer}"
 
-    system_instruction = f"""You are SewaSetu AI Assistant — a polite, helpful, and empathetic government services assistant for the Chhattisgarh Sewa Setu portal.
-Synthesize the provided information into a unified and consistent final response.
+    # Build dynamic service-specific rules for final synthesis
+    service_rules_final = ""
+    if service_id is not None:
+        if int(service_id) == 7:
+            service_rules_final = (
+                "- ELIGIBILITY LOGIC RULE (Domicile): If a citizen asks about eligibility or exceptions for the Domicile Certificate, explain the rules strictly:\n"
+                "  1. Main Path (Both Criteria One AND Criteria Two must be met): The applicant must satisfy AT LEAST ONE option from Criteria One (Criteria A) AND AT LEAST ONE option from Criteria Two (Criteria B).\n"
+                "     * You MUST list Criteria One and Criteria Two under separate, clearly-labeled headers or bullet points.\n"
+                "     * Criteria One (Criteria A) options: Birth in CG, parent resident for 25 years, parent is CG Government/PSU employee, or property in CG for 5 years.\n"
+                "     * Criteria Two (Criteria B) options: 3 years of school study in CG, or passing Class 5, 8, 10, 12 board exam from CG.\n"
+                "     * Never merge them into one list or omit the education requirements of Criteria Two.\n"
+                "  2. Exceptions (Criteria Three / Criteria C): If they do not meet the Main Path (for example, if they lack 'Proof of 15 Years Stay' or did not study in CG), they can still get a Domicile Certificate under the exceptions of Criteria Three (C). For Criteria Three (C), Criteria A and B are NOT required. The exceptions are: (a) spouse is a domicile of CG, (b) applicant or spouse is a CG Government/PSU employee, or (c) applicant or parent is in All India Services and allotted CG Cadre.\n"
+                "  3. Clarity: Never state that Criteria Three requires stay proof or education. Clearly explain that Criteria Three is a standalone set of exceptions that bypasses the need for the stay proof or CG education requirements of Criteria One and Two.\n"
+            )
+        elif int(service_id) == 3:
+            service_rules_final = (
+                "- MARRIAGE JURISDICTION RULE: Under the Chhattisgarh Compulsory Registration of Marriages Rules, a marriage MUST be registered in the local area where the marriage was solemnized or performed, NOT at the couple's hometown or place of residence. The registrar is the Local Authority of that local area (Gram Panchayat if rural; Municipality or Municipal Corporation if urban). State this clearly when citizens ask where or under which office/authority to register their marriage.\n"
+            )
+
+    system_instruction = f"""STRICT ANSWER-ONLY RULE (HIGHEST PRIORITY — READ THIS FIRST):
+Your ENTIRE response must address ONLY the specific question the citizen asked. Adding ANY unrequested information is STRICTLY FORBIDDEN.
+- If asked about fees → respond ONLY with fee details. Do NOT mention documents, eligibility, process, or timelines.
+- If asked about eligibility → respond ONLY with eligibility criteria. Do NOT mention documents, fees, process, or timelines.
+- If asked about documents → respond ONLY with document information. Do NOT mention eligibility, fees, process, or timelines.
+- If asked about timeline/SLA → respond ONLY with the timeline. Do NOT mention anything else.
+- If asked about how to apply → respond ONLY with application process. Do NOT mention documents, eligibility, fees, or timelines.
+- If asked about a single specific document → answer ONLY about that document. Do NOT list all documents.
+- A short, precise, focused answer is ALWAYS better than a long one.
+
+You are SewaSetu AI Assistant — a polite government services assistant for the Chhattisgarh Sewa Setu portal.
 - LANGUAGE AND SCRIPT RULES: {lang_instruction}
+- Be warm, respectful, and citizen-friendly.
+{service_rules_final}
+- MANDATORY DOCUMENTS: If a citizen asks about bypassing a mandatory document, clearly state 'No, you cannot apply without this document' and guide them on how to obtain it.
+- FEE INTERPRETATION: 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee' are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. Total application fee = fee for ONE method. If the citizen asks about total cost and the required documents mention monetary costs (challans, stamp paper, notarization), mention those as additional costs.
+- RAG CONTEXT is the ONLY source of truth. Ignore any contradictions in conversation history.
 
-TONE RULES:
-- Always be warm, respectful, and citizen-friendly. You represent an official government portal.
-- NEVER use harsh, dismissive, blunt, or discouraging language.
-- When a citizen asks about eligibility, present ALL applicable criteria and exceptions from the context before drawing conclusions. If there is ANY criterion that could make them eligible, highlight it clearly and encouragingly.
-- ELIGIBILITY LOGIC RULE (Domicile): For Chhattisgarh Domicile Certificate eligibility, note that: Criteria One (A) and Criteria Two (B) must BOTH be met. Criteria Three (C) is a standalone alternative set of conditions (if Criteria Three is met, Criteria One and Two are NOT required). Thus, eligibility is achieved by: (Criteria One AND Criteria Two) OR (Criteria Three). Do NOT state that all three are required.
-- MARRIAGE JURISDICTION RULE: Under the Chhattisgarh Compulsory Registration of Marriages Rules, a marriage MUST be registered in the local area where the marriage was solemnized or performed, NOT at the couple's hometown or place of residence. The registrar is the Local Authority of that local area (Gram Panchayat if rural; Municipality or Municipal Corporation if urban). State this clearly when citizens ask where or under which office/authority to register their marriage.
-- Use supportive phrases like "Based on the rules, you may be eligible because...", "Please note this helpful provision...", "Here is what applies to your situation..." instead of flat refusals.
+FORMATTING: Use markdown with bold text and bullet points. Keep it clean and scannable.
 
-CONCISENESS RULES:
-- Answer ONLY what the citizen asked. Do NOT volunteer extra information they did not request.
-- If the citizen asks about eligibility, answer ONLY about eligibility. Do NOT add document lists, fees, timelines, or application process unless explicitly asked.
-- If the citizen asks about documents, answer ONLY about documents. Do NOT add eligibility criteria, fees, or process steps.
-- If the citizen asks a specific question about a single document (e.g., whether a specific document is mandatory/optional, or how to get it), answer ONLY that specific question about that single document. Do NOT output or dump the entire list of required documents or other unrelated documents.
-- Keep your response focused and concise. A short, precise answer is always better than a long, unfocused one.
-
-FORMATTING RULES:
-- You MUST structure your final answer using clear sections, bold text highlights, and markdown lists (bullet points or numbered lists).
-- NEVER output large, blocky paragraphs of text.
-- Even for short answers, organize different key facts, steps, or rules into distinct bullet points.
-- Ensure the answer is visually clean, spaced out, and appealing to scan.
-
-CRITICAL: You are strictly FORBIDDEN from mentioning or using technical terms like 'RAG-based', 'RAG', 'First Answer', 'Second Answer', 'Translated to English', 'Reference Context Details', or the synthesis process itself. Do not repeat intermediate headers. Answer naturally as a single consolidated assistance response that a normal user would want to hear.
+CRITICAL: Never mention 'RAG', 'First Answer', 'Second Answer', 'Reference Context Details', or the synthesis process.
 
 RAG CONTEXT:
 {rag_context}
 """
 
     messages_final = [{"role": "system", "content": system_instruction}]
-    history = request.conversation_history or []
-    if not history and request.messages:
-        history = request.messages[:-1]
-    for msg in history:
-        if msg.content:
-            messages_final.append({"role": msg.role, "content": msg.content})
+    # Use CONDENSED history only (last 2 turns), not full raw history
+    if condensed_history:
+        for msg in condensed_history:
+            messages_final.append({"role": msg["role"], "content": msg["content"]})
     messages_final.append({"role": "user", "content": f"{query}\n\nIMPORTANT: You MUST respond ENTIRELY in {lang_label}. {lang_instruction}"})
 
     final_reply = await asyncio.to_thread(generate_answer, messages_final)
@@ -759,7 +909,16 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
         }
 
     # 2. Interactive checklist intercept:
-    if request.interactive and service_id and is_checklist_query(query, english_query, hindi_query):
+    should_intercept = False
+    if request.interactive and service_id:
+        if request.is_option_click:
+            if "show required documents checklist" in query.lower():
+                should_intercept = True
+        else:
+            if is_checklist_query(query, english_query, hindi_query):
+                should_intercept = True
+
+    if should_intercept:
         lang_to_use = "hi" if query_lang == "hi" else "en"
         
         # Retrieve context with force_checklist = True
@@ -776,8 +935,34 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
             }
 
     # 3. Standard RAG execution
+    # === INTENT CLASSIFICATION + QUERY RESOLUTION ===
+    # Sanitize history: remove null/empty/special-type messages
+    raw_history = request.conversation_history or []
+    if not raw_history and request.messages:
+        raw_history = request.messages[:-1]
+    sanitized = sanitize_history(raw_history)
+
+    # Classify query intent: greeting/follow_up/new_topic
+    intent_result = await asyncio.to_thread(
+        classify_query_intent, query, sanitized
+    )
+    intent = intent_result["intent"]
+    resolved_query = intent_result["resolved_query"]
+    topic_summary = intent_result["topic_summary"]
+    
+    print(f"[RAG Pipeline] Intent: {intent}, Resolved query: '{resolved_query}', Topic: '{topic_summary}'")
+
+    # Always use resolved_query for RAG retrieval — the classifier now produces
+    # a self-contained query for BOTH intents (with aspect carry-over for new_topic)
+    rag_query = resolved_query
+    is_follow_up = (intent == "follow_up")
+
+    # Build condensed history for final synthesis only
+    condensed = build_condensed_history(sanitized, is_follow_up, topic_summary)
+
+    # Use the resolved query for intermediate RAG retrieval (gets better chunks for follow-ups)
     query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg = await run_rag_pipeline_intermediates(
-        query, request, service_id, query_lang, english_query, hindi_query
+        rag_query, request, service_id, query_lang, english_query, hindi_query
     )
     
     if not context_en and not context_hi:
@@ -798,7 +983,7 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     return await synthesize_consensus_response(
         query, query_lang, english_query, hindi_query,
         context_en, context_hi, english_answer, hindi_answer, fallback_msg,
-        request, service_id
+        request, service_id, condensed_history=condensed
     )
 
 
@@ -824,6 +1009,12 @@ async def chat_with_bot(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Query text is required.")
 
     query = normalize_query_terms(query)
+
+    # === GREETING INTERCEPTOR (before any LLM/RAG calls) ===
+    greeting_result = detect_greeting(query)
+    if greeting_result:
+        print(f"[API Chat] Greeting detected: '{query}' -> responding with canned greeting")
+        return {"response": greeting_result["response"]}
 
     # 2. Resolve service_id / sno
     service_id = None

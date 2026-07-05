@@ -265,12 +265,23 @@ function App() {
     try {
       const chatHeaders = { 'Content-Type': 'application/json' };
 
-      // Format messages history cleanly for backend Message model validation
-      const messagesForBackend = [
-        ...chatMessages.map(msg => ({
+      // Filter out special message types (interactive_checklist, options) and empty content
+      // Limit to last 6 messages (3 turns) to keep context focused
+      const filteredHistory = chatMessages
+        .filter(msg => 
+          msg.content && 
+          msg.content.trim() !== '' && 
+          msg.type !== 'interactive_checklist' && 
+          msg.type !== 'options'
+        )
+        .map(msg => ({
           role: msg.role,
-          content: msg.content || null
-        })),
+          content: msg.content
+        }))
+        .slice(-6);  // Keep only last 6 messages (3 user-assistant turns)
+
+      const messagesForBackend = [
+        ...filteredHistory,
         { role: 'user', content: queryText }
       ];
 

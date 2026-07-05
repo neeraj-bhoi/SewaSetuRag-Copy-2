@@ -53,20 +53,21 @@ The SewaSetu RAG Chatbot solves this by processing natural language queries and 
   - Documents marked as `(Mandatory: No)` or `(Mandatory: नहीं)` are explicitly identified as optional.
   - The LLM is strictly forbidden from inferring document status from User Manual instructions or general notification paragraphs.
 
-### E. Eligibility Criteria Awareness
-* The system prompts instruct the LLM to read **ALL** eligibility criteria, rules, and exceptions from the retrieved context before answering eligibility questions.
-* **Domicile Logic Rules:** The system strictly parses Domicile eligibility logic as `(Criteria One AND Criteria Two) OR (Criteria Three)`. It enforces this logical distinction at both prompt and synthesis stages so that the bot does not incorrectly declare that all criteria groups must be satisfied.
+### E. Eligibility Criteria Awareness & Dynamic Injection
+* **Dynamic Rules Injection:** To prevent prompt pollution, service-specific instructions (such as Domicile eligibility rules or Marriage solemnization registration jurisdiction rules) are loaded dynamically based on the active `service_id` and injected directly into the prompt layers, keeping the global prompts clean.
+* **Residency & Education Decoupling:** The system prompts instruct the LLM to read **ALL** eligibility criteria, rules, and exceptions from the retrieved context before answering eligibility questions.
+* **Domicile Logic Rules:** The system strictly parses Domicile eligibility logic as `(Criteria One AND Criteria Two) OR (Criteria Three)`. It enforces this logical distinction at both prompt and synthesis stages so that the bot does not incorrectly declare that all criteria groups must be satisfied. It strictly separates Criteria One (Residency/Parent Status) and Criteria Two (CG Education) under separate headers and lists, explaining that options from both categories are required.
 * Special attention is given to alternative criteria, exceptions, and special cases (e.g., criteria for spouses of government employees, property holders, All India Services cadre allottees).
 * The LLM is forbidden from assuming ineligibility if **any** criterion in the context could apply to the citizen's situation.
 
 ### F. Contextual Grounding & RAG Context Injection
-* Retrieved chunks from ChromaDB are directly embedded into the LLM system prompts for both intermediate (English/Hindi) answer generation.
+* Retrieved Chunks from ChromaDB are directly embedded into the LLM system prompts for both intermediate (English/Hindi) answer generation.
 * This ensures the LLM generates answers grounded in actual database content rather than relying on its parametric knowledge, preventing hallucinated document lists or incorrect eligibility determinations.
 
-### G. Conciseness Enforcement
-* The LLM is instructed to answer **ONLY** what the citizen asked, without volunteering unrelated information.
-* Eligibility questions receive only eligibility answers (no document dumps, fees, or process steps).
-* Document questions receive only document answers (no eligibility or process information).
+### G. Conciseness Enforcement (Forbidden Information)
+* **Conciseness Enforcement:** The LLM is instructed to answer **ONLY** what the citizen asked, without volunteering unrelated information.
+* **Forbidden Information:** If the query is about eligibility, the LLM is strictly forbidden from outputting document lists, process steps, fees, timelines, or contacts. If the query is about a single attribute (SLA, fee, department, or contact), the LLM must return ONLY that value and exclude other metadata fields.
+* **Bypassable Interactive Checklist Intercept:** If a citizen asks about documents, they are prompted with choices to check eligibility, read detailed rules, or directly answer the question. If they select "Directly Answer My Question", the backend intercepts the click and bypasses the interactive checklist, rendering a standard text answer.
 
 ### H. Polite Tone Enforcement
 * All system prompts require warm, respectful, and citizen-friendly language.
@@ -92,6 +93,9 @@ The SewaSetu RAG Chatbot solves this by processing natural language queries and 
 * **Script Integrity:** To prevent mixing scripts, English terms present in the context (like `affidavit`, `mandatory`) are translated into Devanagari Hindi in Devanagari-mode outputs instead of copying Roman text.
 * **Document-Specific Conciseness:** When users ask a narrow question targeting a single document (e.g., whether it is mandatory), the LLM answers only that specific question and is prohibited from dumping the entire document checklist.
 * **Devanagari Transliterated Triggers:** Supports common Hindi abbreviations like `एससी`, `एसटी`, `ओबीसी`, `डोमिसाइल`, `मैरिज`, and `गजट` for reliable service auto-classification.
+
+### M. Missing Mandatory Documents Verification
+* **Missing Documents Handling:** If a citizen asks what to do if they lack a mandatory document required by the portal (such as the Marriage Invitation Card), the LLM is strictly instructed **not** to suggest that they can submit the application online with only the remaining documents. Instead, it must explicitly state that all mandatory documents (marked as `Mandatory: Yes` or `अनिवार्य: हाँ`) are required for online submission, and guide them to legal or offline alternatives (such as using a solemnization certificate from a priest/institution or applying physically at the local Registrar's office where other proof types can be verified offline under the Compulsory Marriage Registration Rules).
 
 ---
 
@@ -163,22 +167,43 @@ Drives database connections and reranking operations:
 The frontend is a single-page React application compiled via Vite. 
 
 ### A. Core State Management (`App.jsx`)
-Coordinates the chat lifecycle and details drawer:
+Coordinates the chat lifecycle, service listings, sidebar, and details drawer:
 ```javascript
 const [chatMessages, setChatMessages] = useState([]);
 const [inputText, setInputText] = useState('');
 const [isChatLoading, setIsChatLoading] = useState(false);
 ```
 
+### B. Interactive Document Checklist (`DocumentChecklist.jsx`)
+The frontend contains a highly interactive document verification drawer component [DocumentChecklist.jsx](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/frontend/src/components/DocumentChecklist.jsx) that evaluates apply eligibility based on user document selections.
+* **State Management:**
+  - `checkedDocIds`: Tracks checked document ID list.
+  - `collapsedGroups`: Tracks collapse toggle state of document card categories.
+* **Satisfaction Logic:**
+  - A document group is complete if it is marked as `anyOne = true` and at least one supporting document inside the group is checked.
+  - If `anyOne = false`, it requires all supporting documents flagged as mandatory to be checked.
+* **Reactive Status Banner:**
+  - Displays a green success banner if all mandatory groups are satisfied.
+  - Displays a warning banner showing missing mandatory group names if some required documents are unchecked.
+  - Displays a grey informational banner if no documents have been ticked yet.
+* **Action Routing:**
+  - Incorporates a direct link to the official Sewa Setu application portal dynamically populated with the target `serviceId`. The apply button remains disabled until the user satisfies all mandatory document criteria.
+
 ---
 
 ## 6. Ingestion Pipeline & Vector Database
 
-The ingestion pipeline populates the persistent vector database (`chroma_db/`) from raw documentation:
+The ingestion pipeline populates the persistent vector database (`chroma_db/`) from raw documentation and official web pages:
 
-1. **OCR Extraction (`ingestion/ocr_pdfs.py`):** Uses EasyOCR to parse scanned PDF manuals (located in `data/pdf_data/`) into structured txt logs inside `data/ocr_output/`.
-2. **Semantic Chunking (`ingestion/chunker.py`):** Splits the raw texts into overlapping chunks, identifying service tables, headers, and metadata rules.
-3. **Embeddings Storage (`ingestion/embed_and_store.py`):** Encodes text chunks using `intfloat/multilingual-e5-large` and inserts them into ChromaDB with metadata filters (`service_id`, `lang`).
+1. **Web Services Detail Scraper (`ingestion/scraper/scrape_services.py`):**
+   - Scrapes official detail pages on `sewasetu.cgstate.gov.in`.
+   - Parses the HTML structure using `BeautifulSoup` to extract details (SLA, department, fees, and contact details).
+   - Sends a POST request to the API preview endpoint `https://api-ed.cgstate.gov.in/api/application-management/edistrict2/applicationFormPreviewByServiceId` with the service ID to retrieve form attribute fields in JSON.
+   - Downloads referenced instructions PDFs, user manuals, and document format specifications, saving them locally under `data/pdfs/`.
+   - Extracts text from downloaded PDFs, generates combined service details manual text files, maps metadata JSON profiles (stored under `data/profiles/`), and compiles them into a unified services details manifest (`data/services_data.json`).
+2. **OCR Extraction (`ingestion/ocr_pdfs.py`):** Uses EasyOCR to parse scanned legal acts and notification PDFs (located in `pdf_data/`) into structured txt logs inside `data/ocr_output/`.
+3. **Semantic Chunking (`ingestion/chunker.py`):** Splits both the scraped combined manuals (under `data/extracted_text/`) and the OCR outputs (under `data/ocr_output/`) into overlapping semantic chunks of 1500 tokens with 200 tokens overlap using tiktoken encoding.
+4. **Embeddings Storage (`ingestion/embed_and_store.py`):** Encodes text chunks using the `intfloat/multilingual-e5-large` sentence-transformer model (incorporating `passage: ` prefix convention for E5 embeddings) and inserts them into ChromaDB with metadata filters (`service_id`, `lang`, `doc_type`, `section`).
 
 ## 7. Automated Testing & Verification
 
@@ -191,6 +216,9 @@ The project provides robust testing suites to validate RAG accuracy, language de
 ### B. Comprehensive 50-Query Validation Suite
 * **Script:** `scratch/run_50_tests.py`
 * **Purpose:** Runs 50 test cases covering basic portal information, tough context-specific conditions, and out-of-scope requests. It progressively commits the results to `test_results.md` after every query, allowing real-time audit verification.
+
+> [!NOTE]
+> The active test execution scripts `run_document_queries_evaluation.py` and `scratch/run_50_tests.py` represent the validation framework. If these runner scripts are omitted from your workspace distribution, the previously audited results are preserved for inspection directly in the static report files: [test_results.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results.md) and `document_queries_evaluation_report.md`.
 * **Coverage:**
   - 1–20: Basic service info (fees, timeline, documents).
   - 21–40: Tough context-specific scenarios (domicile eligibility logic, Raipur marriage registration jurisdiction, MP Reorganisation Act).

@@ -942,6 +942,21 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
         raw_history = request.messages[:-1]
     sanitized = sanitize_history(raw_history)
 
+    # Filter out greeting exchanges from history (they're not service context)
+    greeting_words = {"hi", "hello", "hey", "hii", "hiii", "namaste", "namaskar", "bye", "thanks", "thank you", "ok", "okay", "haan", "theek hai"}
+    filtered_sanitized = []
+    skip_next = False
+    for i, msg in enumerate(sanitized):
+        if skip_next:
+            skip_next = False
+            continue
+        if msg["role"] == "user" and msg["content"].strip().lower() in greeting_words:
+            # Skip this user greeting AND the next assistant response
+            skip_next = True
+            continue
+        filtered_sanitized.append(msg)
+    sanitized = filtered_sanitized
+
     # Classify query intent: greeting/follow_up/new_topic
     intent_result = await asyncio.to_thread(
         classify_query_intent, query, sanitized
@@ -957,10 +972,27 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     rag_query = resolved_query
     is_follow_up = (intent == "follow_up")
 
+    # SAFETY CHECK: Detect misclassified topic switches
+    # If the classifier says follow_up but the topic_summary mentions "different service",
+    # force-clear history to prevent cross-service contamination
+    if is_follow_up and topic_summary:
+        topic_lower = topic_summary.lower()
+        if any(phrase in topic_lower for phrase in ["different service", "new service", "another service", "different topic"]):
+            print(f"[RAG Pipeline] SAFETY: Classifier said follow_up but topic indicates topic switch. Forcing new_topic.")
+            is_follow_up = False
+            intent = "new_topic"
+
     # Build condensed history for final synthesis only
     condensed = build_condensed_history(sanitized, is_follow_up, topic_summary)
 
-    # Use the resolved query for intermediate RAG retrieval (gets better chunks for follow-ups)
+    # If resolved query differs from original, re-translate for better RAG retrieval
+    # e.g., original "and what about marriage?" → resolved "What are the fees for marriage registration?"
+    # Without re-translation, RAG would search for vague "what about marriage?" and get ALL chunks
+    if rag_query.lower().strip() != query.lower().strip():
+        print(f"[RAG Pipeline] Re-translating resolved query for RAG: '{rag_query}'")
+        query_lang, english_query, hindi_query = await process_query_languages(rag_query)
+
+    # Use the resolved query + re-translated languages for RAG retrieval
     query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg = await run_rag_pipeline_intermediates(
         rag_query, request, service_id, query_lang, english_query, hindi_query
     )

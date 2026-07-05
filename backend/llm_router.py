@@ -636,16 +636,44 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
     if not recent_history or len(recent_history) == 0:
         return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
 
-    # Build a compact history string for the LLM
+    # Build structured history with EXPLICIT recency markers
+    # Split into: older context (background) and most recent exchange (current topic)
+    history_msgs = recent_history[-4:]  # Last 2 turns max
+    
     history_str = ""
-    for msg in recent_history[-4:]:  # Last 2 turns max
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if content:
-            # Truncate long assistant responses to save tokens
-            if role == "assistant" and len(content) > 200:
-                content = content[:200] + "..."
-            history_str += f"{role.upper()}: {content}\n"
+    
+    if len(history_msgs) >= 4:
+        # 2 turns: show older as background, most recent as current topic
+        # Older turn (background)
+        history_str += "OLDER CONTEXT (background only, NOT the current topic):\n"
+        for msg in history_msgs[:2]:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if content:
+                if role == "assistant" and len(content) > 150:
+                    content = content[:150] + "..."
+                history_str += f"  {role.upper()}: {content}\n"
+        
+        # Most recent turn (CURRENT TOPIC)
+        history_str += "\nMOST RECENT EXCHANGE (THIS IS THE CURRENT TOPIC):\n"
+        for msg in history_msgs[2:]:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if content:
+                if role == "assistant" and len(content) > 150:
+                    content = content[:150] + "..."
+                history_str += f"  {role.upper()}: {content}\n"
+    else:
+        # 1 turn or less: everything is the current topic
+        history_str += "MOST RECENT EXCHANGE (THIS IS THE CURRENT TOPIC):\n"
+        for msg in history_msgs:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if content:
+                if role == "assistant" and len(content) > 150:
+                    content = content[:150] + "..."
+                history_str += f"  {role.upper()}: {content}\n"
+
 
     prompt = (
         "You are a query classifier for a government services chatbot. Given a conversation history and the user's latest query, classify the intent and produce a self-contained resolved query.\n\n"
@@ -659,12 +687,15 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
         "- For follow_up: Replace pronouns/implicit references with the MOST RECENT service name from history.\n"
         "- For new_topic with aspect carry-over: If the query is short and references a new service but the ASPECT is implied from the previous conversation (e.g., 'what about Service B?' after discussing fees of Service A), carry over the aspect into the resolved_query (e.g., 'what are the fees for Service B?').\n"
         "- For new_topic that is fully self-contained: Keep the resolved_query as the original query.\n\n"
+        "CONSISTENCY CHECK (MANDATORY):\n"
+        "If your resolved_query contains a DIFFERENT service name than the most recent service in the conversation history, the intent MUST be new_topic. Never label it as follow_up if the resolved service is different from the history service.\n\n"
         f"CONVERSATION HISTORY:\n{history_str}\n"
         f"LATEST USER QUERY: {query}\n\n"
         "Respond with ONLY a JSON object (no markdown, no code fences, no explanation):\n"
         '{"intent": "follow_up" or "new_topic", "resolved_query": "fully self-contained rewritten query with service name and aspect", "topic_summary": "1-line summary"}\n'
         "JSON:"
     )
+
 
 
 

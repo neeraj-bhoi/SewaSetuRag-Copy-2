@@ -55,8 +55,11 @@ graph TD
 * **URL Sanitizer:** Strips LLM-generated markdown links or buttons from final outputs and appends a single, verified redirection button linking to the official portal page.
 
 ### 5. Contextual Grounding & Response Quality
-* **RAG Context Injection:** Retrieved chunks are directly embedded into the LLM system prompts for both intermediate (English/Hindi) answer generation, ensuring the LLM is grounded on actual database content rather than its parametric knowledge.
+* **Contextual Grounding:** Retrieved chunks are directly embedded into the LLM system prompts for both intermediate (English/Hindi) answer generation, ensuring the LLM is grounded on actual database content rather than its parametric knowledge.
 * **Dynamic Rules Injection:** To prevent prompt pollution, service-specific instructions (such as Domicile eligibility rules or Marriage solemnization registration jurisdiction rules) are loaded dynamically based on the active `service_id` and injected directly into the prompt layers, keeping the global prompts clean.
+* **State-Aware History & Context Isolation:** Cleans conversation history using `sanitize_history`, limits history to the last 6 messages (3 turns) on the client, and restricts RAG generation history to the last 1 turn plus a previous topic summary to solve "triple-amplification". For service switches, history is completely cleared.
+* **Prompt-Based Classifier Safety Nets:** Tuning instructions in `llm_router.py` prevent service process, fee, or document queries (e.g. Hinglish "caste certificate kaise banayein") from being hijacked by early canned responses (like `identity` or `out_of_scope`).
+* **Programmatic Switch Safety Net:** If the classifier fails during an active service switch, `query_contains_service_keywords()` intercepts the switch, overrides the intent to `new_topic`, and clears history to isolate the database context.
 * **Eligibility Criteria Awareness:** The system prompts instruct the LLM to read ALL eligibility criteria, rules, and exceptions from the context before answering — including alternative criteria for spouses, government employees, property holders, and other special cases. Domicile eligibility requires strictly splitting the main path rules into two distinct requirements under separate headers (Criteria One and Criteria Two) and enforcing that both must be satisfied.
 * **Forbidden Information Conciseness:** The LLM is instructed to answer ONLY what the citizen asked, without volunteering unrelated information. If the query is about eligibility, the LLM is strictly forbidden from outputting document lists, process steps, fees, timelines, or contacts. If the query is about a single attribute (SLA, fee, department, or contact), the LLM must return ONLY that value and exclude other metadata fields.
 * **Bypassable Interactive Checklist Intercept:** If a citizen asks about documents, they are prompted with choices to check eligibility, read detailed rules, or directly answer the question. If they select "Directly Answer My Question", the backend intercepts the click and bypasses the interactive checklist, rendering a standard text answer.
@@ -103,6 +106,8 @@ SewaSetuRag/
 ├── chroma_db/                           # Persistent ChromaDB Vector Store
 ├── requirements.txt                     # Backend Python dependencies
 ├── .env.example                         # Template configuration environment file
+├── api.md                               # API endpoint schemas & float widget web integration guide
+├── history.md                           # Chat history tracking architecture & data flow diagrams
 └── README.md                            # Comprehensive project guide
 ```
 
@@ -215,18 +220,18 @@ This generates `document_queries_evaluation_report.md` showing:
 * Latency statistics.
 
 ### 2. Comprehensive 50-Query Validation Runner
-To run a comprehensive test of 50 queries covering basic information, tough/detailed context specific questions (e.g. domicile eligibility and marriage registration location rules), and out-of-scope requests:
+To run a comprehensive test of 50 queries covering basic information, tough/detailed context-specific questions (e.g., domicile eligibility and marriage registration location rules), and out-of-scope requests:
 ```bash
-python scratch/run_50_tests.py
+python test_50_queries.py
 ```
-This progressively logs results after every question and saves the full audit report as [test_results.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results.md) showing:
+This progressively logs results after every question and saves the full audit report as [test_results5.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results5.md) showing:
 * Response latencies.
 * Language detection accuracy.
 * Auto-mapped Service IDs.
 * Full bot responses in English, Hindi, and Hinglish.
 
 > [!NOTE]
-> The active test execution scripts `run_document_queries_evaluation.py` and `scratch/run_50_tests.py` represent the validation framework. If these runner scripts are omitted from your workspace distribution, the previously audited results are preserved for inspection directly in the static report files: [test_results.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results.md) and `document_queries_evaluation_report.md`.
+> The active test execution scripts `run_document_queries_evaluation.py` and `test_50_queries.py` represent the validation framework. If these runner scripts are omitted from your workspace distribution, the previously audited results are preserved for inspection directly in the static report files: [test_results5.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results5.md) and `document_queries_evaluation_report.md`.
 
 ---
 

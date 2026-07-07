@@ -44,8 +44,11 @@ The SewaSetu RAG Chatbot solves this by processing natural language queries and 
 * **Manual Portal Boost (+0.1):** Dynamically applies a `+0.1` boost to all `combined_manual` portal specification chunks. This prioritizes portal rules over raw legal notification texts (such as gazettes and rulebooks) which may be outdated or lack implementation checklists.
 * **Checklist Pinning:** If a query contains document, fee, or timeline keywords, the backend isolates the service's `REQUIRED DOCUMENTS` table chunk and pins it to **Rank 1** of the context.
 
-
-
+### C. State-Aware Chat History & Context Isolation
+* **Frontend Filtering & Windowing:** The frontend React client filters out interactive UI elements and buttons, sending only valid text dialogue history, and restricts the payload to the last 6 messages (3 turns) to control API token usage.
+* **Backend Sanitization (`sanitize_history`):** The backend sanitizes the incoming history by stripping empty messages and system roles.
+* **Condensed History Pipeline (`build_condensed_history`):** To solve the "triple-amplification" problem (where the LLM synthesizes previous turns' service rules repeatedly), follow-up queries are processed using only the last 1 turn (2 messages) of conversation history along with a 1-line `topic_summary` context injection. For a `new_topic` (service switch), history is cleared completely (`[]`).
+* **Fast Canned Intent Interception:** Non-RAG intents (`greeting`, `farewell`, `thanks`, `identity`, `out_of_scope`) are early-intercepted and resolved directly to localized canned responses (supporting English, Hindi, and Hinglish), bypassing vector retrieval and synthesis prompts entirely.
 
 ### D. Strict Factual Grounding (Checklist Validation)
 * The system enforces strict rules on document status:
@@ -57,6 +60,8 @@ The SewaSetu RAG Chatbot solves this by processing natural language queries and 
 * **Dynamic Rules Injection:** To prevent prompt pollution, service-specific instructions (such as Domicile eligibility rules or Marriage solemnization registration jurisdiction rules) are loaded dynamically based on the active `service_id` and injected directly into the prompt layers, keeping the global prompts clean.
 * **Residency & Education Decoupling:** The system prompts instruct the LLM to read **ALL** eligibility criteria, rules, and exceptions from the retrieved context before answering eligibility questions.
 * **Domicile Logic Rules:** The system strictly parses Domicile eligibility logic as `(Criteria One AND Criteria Two) OR (Criteria Three)`. It enforces this logical distinction at both prompt and synthesis stages so that the bot does not incorrectly declare that all criteria groups must be satisfied. It strictly separates Criteria One (Residency/Parent Status) and Criteria Two (CG Education) under separate headers and lists, explaining that options from both categories are required.
+* **Prompt-Based Service Classification safety nets:** Refined LLM classifier instructions prevent queries about service procedures, fees, or documents (e.g. Hinglish "process batao") from being incorrectly hijacked by early interceptors. If a query mentions specific service keywords, it is strictly classified as a service query (`new_topic` or `follow_up`), bypassing `identity`/`out_of_scope`.
+* **Programmatic Keyword Safety Net:** If the classifier hallucinates a `follow_up` intent during an active service switch, `query_contains_service_keywords()` programmatically intercepts the switch and overrides the intent to `new_topic`, clearing context history to prevent data leakage.
 * Special attention is given to alternative criteria, exceptions, and special cases (e.g., criteria for spouses of government employees, property holders, All India Services cadre allottees).
 * The LLM is forbidden from assuming ineligibility if **any** criterion in the context could apply to the citizen's situation.
 
@@ -214,15 +219,18 @@ The project provides robust testing suites to validate RAG accuracy, language de
 * **Purpose:** Validates the RAG system across 20 document-related queries in English, Hindi, and Hinglish. It asserts correct language detection, context chunk routing, document status, and response latency. It writes an audit log to `document_queries_evaluation_report.md`.
 
 ### B. Comprehensive 50-Query Validation Suite
-* **Script:** `scratch/run_50_tests.py`
-* **Purpose:** Runs 50 test cases covering basic portal information, tough context-specific conditions, and out-of-scope requests. It progressively commits the results to `test_results.md` after every query, allowing real-time audit verification.
+* **Script:** `test_50_queries.py`
+* **Purpose:** Runs 50 test cases covering basic portal information, tough context-specific conditions, out-of-scope requests, and rapid service switches. It progressively commits the results to a markdown results file after every query, allowing real-time audit verification.
+* **Reports:**
+  - `test_results3.md` / `test_results4.md`: Original structured multi-service flows and switches testing.
+  - `test_results5.md`: Stress-testing with 50 highly conversational, messy, typo-ridden, and colloquial Hinglish user queries.
+* **Coverage:**
+  - 1–20: Basic service info (fees, timeline, documents).
+  - 21–40: Tough context-specific scenarios (domicile eligibility logic, Raipur marriage registration jurisdiction, MP Reorganisation Act, active context aspect carry-overs).
+  - 41–50: Out-of-scope queries (cooking, politics, celebrity info) verifying correct language-specific fallback messages.
 
 > [!NOTE]
 > The active test execution scripts `run_document_queries_evaluation.py` and `scratch/run_50_tests.py` represent the validation framework. If these runner scripts are omitted from your workspace distribution, the previously audited results are preserved for inspection directly in the static report files: [test_results.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results.md) and `document_queries_evaluation_report.md`.
-* **Coverage:**
-  - 1–20: Basic service info (fees, timeline, documents).
-  - 21–40: Tough context-specific scenarios (domicile eligibility logic, Raipur marriage registration jurisdiction, MP Reorganisation Act).
-  - 41–50: Out-of-scope queries (home loans, scholarships, weather) verifying correct language-specific fallback messages.
 
 ---
 

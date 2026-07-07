@@ -218,7 +218,7 @@ def query_contains_service_keywords(query: str, resolved_query: str, service_id:
         4: ["sc", "st", "caste", "jati", "जाति", "एससी", "एसटी"],
         5: ["obc", "caste", "jati", "पिछड़ा", "ओबीसी"],
         7: ["domicile", "resident", "niwas", "निवास", "निवासी", "मूल निवासी"],
-        201: ["name change", "gazette", "नाम", "परिवर्तन", "राजपत्र"]
+        201: ["name change", "gazette", "नाम", "परिवर्तन", "राजपत्र", "naam change", "naam badal", "naam parivartan", "naam correction", "change name"]
     }
     return any(kw in q for kw in keywords.get(service_id, []))
 
@@ -859,7 +859,7 @@ RAG CONTEXT:
             "hindi_answer": hindi_answer,
             "service_id": service_id
         }
-    return {"response": final_reply}
+    return {"response": final_reply, "service_id": service_id}
 
 
 async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optional[int]):
@@ -890,7 +890,7 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                     "query": f"Explain all criteria and eligibility rules for {service_name}"
                 },
                 {
-                    "label": "💬 सीधे मेरे सवाल का जवाब पाएं",
+                    "label": "💬 सीधे अपने सवाल का जवाब पाएं",
                     "query": query
                 }
             ]
@@ -993,6 +993,16 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     topic_summary = intent_result["topic_summary"]
     
     print(f"[RAG Pipeline] Intent: {intent}, Resolved query: '{resolved_query}', Topic: '{topic_summary}'")
+
+    if intent == "new_topic":
+        try:
+            classification = await asyncio.to_thread(classify_service, resolved_query, services_list, True)
+            if classification and classification.get("service_id"):
+                new_service_id = int(classification["service_id"])
+                print(f"[RAG Pipeline] Dynamic LLM classification mapped query to service_id: {new_service_id}")
+                service_id = new_service_id
+        except Exception as e:
+            print(f"[RAG Pipeline] Dynamic LLM classification failed: {e}")
 
     # === INTERCEPT non-RAG intents (greeting, farewell, thanks, identity, out_of_scope) ===
     intent_response = get_intent_response(intent, query)

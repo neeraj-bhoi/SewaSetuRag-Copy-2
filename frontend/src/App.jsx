@@ -301,6 +301,13 @@ function App() {
 
       if (res.ok) {
         const data = await res.json();
+        if (data.service_id) {
+          const matchedService = services.find(srv => srv.service_id.toString() === data.service_id.toString());
+          if (matchedService && matchedService.sno !== selectedSno) {
+            setSelectedSno(matchedService.sno);
+          }
+        }
+
         if (data.mode === "interactive") {
           const newMsg = {
             role: 'assistant',

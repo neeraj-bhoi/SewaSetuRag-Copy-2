@@ -418,7 +418,7 @@ def translate_query_to_hindi(query: str) -> str:
     return query
 
 
-def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+def classify_service(query: str, services_list: List[Dict[str, Any]], use_llm_only: bool = False) -> Dict[str, Optional[str]]:
     """
     Service classification mapping matching query to correct serial number 'sno'.
     Uses rule-based heuristics first, then calls Sarvam AI if no high-confidence rule match is found.
@@ -426,91 +426,96 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
     if not query:
         return {"sno": None, "service_id": None}
 
-    q_lower = query.lower()
+    if use_llm_only:
+        print(f"[LLM Router] Bypassing heuristics, using LLM-only classification for query: '{query}'")
+        has_in_scope = True
+    else:
+        q_lower = query.lower()
 
-    # Avoid calling LLM for very short generic inputs or greetings
-    greetings = {"hi", "hello", "hey", "ok", "okay", "yes", "no", "thanks", "thank you", "plz", "please", "help", "namaste", "नमस्ते", "हेलो", "बाय", "bye"}
-    words = set(q_lower.split())
-    if len(q_lower.strip()) < 3 or (len(words) == 1 and words.intersection(greetings)):
-        print(f"[LLM Router] Simple greeting or short query detected: '{query}'. Skipping classification.")
-        return {"sno": None, "service_id": None}
+        # Avoid calling LLM for very short generic inputs or greetings
+        greetings = {"hi", "hello", "hey", "ok", "okay", "yes", "no", "thanks", "thank you", "plz", "please", "help", "namaste", "नमस्ते", "हेलो", "बाय", "bye"}
+        words = set(q_lower.split())
+        if len(q_lower.strip()) < 3 or (len(words) == 1 and words.intersection(greetings)):
+            print(f"[LLM Router] Simple greeting or short query detected: '{query}'. Skipping classification.")
+            return {"sno": None, "service_id": None}
 
-    # Define in-scope keywords
-    has_marriage = any(k in q_lower for k in ["marriage", "marrage", "mariage", "shadi", "shaadi", "vivah", "विवाह", "शादी", "मैरिज", "मॅरिज"])
-    has_gazette = any(k in q_lower for k in ["gazette", "gazzete", "gazzette", "gazet", "name change", "नाम परिवर्तन", "राजपत्र", "affidavit for name change", "गजट"])
-    has_domicile = any(k in q_lower for k in ["domicile", "domicil", "domiciel", "domicille", "dimicile", "domisile", "domisiel", "domocile", "domociel", "resident", "residence", "निवास", "मूल निवासी", "डोमिसाइल"])
-    has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग", "ओबीसी", "ओ.बी.सी."])
-    has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "cast", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar", "एससी", "एसटी", "एससी/एसटी"]) or any(re.search(r'\b' + re.escape(k) + r'\b', q_lower) for k in ["sc", "st"])
+        # Define in-scope keywords
+        has_marriage = any(k in q_lower for k in ["marriage", "marrage", "mariage", "shadi", "shaadi", "vivah", "विवाह", "शादी", "मैरिज", "मॅरिज"])
+        has_gazette = any(k in q_lower for k in ["gazette", "gazzete", "gazzette", "gazet", "name change", "naam change", "naam badal", "naam parivartan", "naam correction", "change name", "नाम परिवर्तन", "राजपत्र", "affidavit for name change", "गजट"])
+        has_domicile = any(k in q_lower for k in ["domicile", "domicil", "domiciel", "domicille", "dimicile", "domisile", "domisiel", "domocile", "domociel", "resident", "residence", "निवास", "मूल निवासी", "डोमिसाइल"])
+        has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग", "ओबीसी", "ओ.बी.सी."])
+        has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "cast", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar", "एससी", "एसटी", "एससी/एसटी"]) or any(re.search(r'\b' + re.escape(k) + r'\b', q_lower) for k in ["sc", "st"])
 
-    has_in_scope = has_marriage or has_gazette or has_domicile or has_obc or has_caste
+        has_in_scope = has_marriage or has_gazette or has_domicile or has_obc or has_caste
 
-    # Define out-of-scope keywords
-    has_out_of_scope = any(k in q_lower for k in [
-        "scholarship", "छात्रवृत्ति", "matric", "स्कॉलरशिप",
-        "rental", "rent", "किराया", "रेंट", "एग्रीमेंट",
-        "water connection", "जल कनेक्शन", "नल कनेक्शन", "water supply",
-        "electricity", "बिजली", "power", "विद्युत",
-        "ration card", "राशन कार्ड",
-        "land records", "khasra", "khatauni", "b-1", "b-i", "खसरा", "नक्शा", "ज़मीन",
-        "housing loan", "home loan", "ऋण", "लोन", "loan",
-        "income certificate", "आय प्रमाण पत्र", "आय प्रमाणपत्र"
-    ])
+        # Define out-of-scope keywords
+        has_out_of_scope = any(k in q_lower for k in [
+            "scholarship", "छात्रवृत्ति", "matric", "स्कॉलरशिप",
+            "rental", "rent", "किराया", "रेंट", "एग्रीमेंट",
+            "water connection", "जल कनेक्शन", "नल कनेक्शन", "water supply",
+            "electricity", "बिजली", "power", "विद्युत",
+            "ration card", "राशन कार्ड",
+            "land records", "khasra", "khatauni", "b-1", "b-i", "खसरा", "नक्शा", "ज़मीन",
+            "housing loan", "home loan", "ऋण", "लोन", "loan",
+            "income certificate", "आय प्रमाण पत्र", "आय प्रमाणपत्र"
+        ])
 
-    # If it contains out-of-scope keywords and NOT in-scope keywords, it is definitely out-of-scope
-    if has_out_of_scope and not has_in_scope:
-        print(f"[LLM Router] Rule-based filter: Query contains out-of-scope terms and no in-scope terms. Mapping to None.")
-        return {"sno": None, "service_id": None}
+        # If it contains out-of-scope keywords and NOT in-scope keywords, it is definitely out-of-scope
+        if has_out_of_scope and not has_in_scope:
+            print(f"[LLM Router] Rule-based filter: Query contains out-of-scope terms and no in-scope terms. Mapping to None.")
+            return {"sno": None, "service_id": None}
 
-    # 1. Quick rule-based heuristic check for high confidence in-scope keywords
-    if has_marriage:
-        return {"sno": "1", "service_id": "3"}
-    if has_gazette:
-        return {"sno": "5", "service_id": "201"}
-    if has_obc:
-        return {"sno": "3", "service_id": "5"}
-    if has_caste:
-        return {"sno": "2", "service_id": "4"}
-    if has_domicile:
-        return {"sno": "4", "service_id": "7"}
+    if not use_llm_only:
+        # 1. Quick rule-based heuristic check for high confidence in-scope keywords
+        if has_gazette:
+            return {"sno": "5", "service_id": "201"}
+        if has_obc:
+            return {"sno": "3", "service_id": "5"}
+        if has_caste:
+            return {"sno": "2", "service_id": "4"}
+        if has_domicile:
+            return {"sno": "4", "service_id": "7"}
+        if has_marriage:
+            return {"sno": "1", "service_id": "3"}
 
-    # 2. Try semantic database lookup before LLM fallback
-    try:
+        # 2. Try semantic database lookup before LLM fallback
         try:
-            from backend.rag import collection, embedding_model
-        except ImportError:
-            from rag import collection, embedding_model
+            try:
+                from backend.rag import collection, embedding_model
+            except ImportError:
+                from rag import collection, embedding_model
 
-        print(f"[LLM Router] Performing semantic lookup fallback for query: '{query}'")
-        query_text = f"query: {query}"
-        query_vector = embedding_model.encode(query_text).tolist()
-        
-        # Query database without service filter
-        results = collection.query(
-            query_embeddings=[query_vector],
-            n_results=3,
-            where={"lang": "en"}
-        )
-        
-        if results and "documents" in results and results["documents"]:
-            docs = results["documents"][0]
-            metas = results["metadatas"][0]
-            distances = results["distances"][0]
+            print(f"[LLM Router] Performing semantic lookup fallback for query: '{query}'")
+            query_text = f"query: {query}"
+            query_vector = embedding_model.encode(query_text).tolist()
             
-            threshold = 0.45 if has_in_scope else 0.33
-            if distances and distances[0] < threshold:
-                matched_sid = metas[0].get("service_id")
-                if matched_sid:
-                    # Find matching sno in services_list
-                    matched_sno = None
-                    for s in services_list:
-                        if str(s["service_id"]) == str(matched_sid):
-                            matched_sno = str(s["sno"])
-                            break
-                    if matched_sno:
-                        print(f"[LLM Router] Semantic match found: service_id {matched_sid} (sno {matched_sno}) with distance {distances[0]:.4f}")
-                        return {"sno": matched_sno, "service_id": str(matched_sid)}
-    except Exception as e:
-        print(f"[LLM Router] Semantic classification fallback failed: {e}")
+            # Query database without service filter
+            results = collection.query(
+                query_embeddings=[query_vector],
+                n_results=3,
+                where={"lang": "en"}
+            )
+            
+            if results and "documents" in results and results["documents"]:
+                docs = results["documents"][0]
+                metas = results["metadatas"][0]
+                distances = results["distances"][0]
+                
+                threshold = 0.45 if has_in_scope else 0.33
+                if distances and distances[0] < threshold:
+                    matched_sid = metas[0].get("service_id")
+                    if matched_sid:
+                        # Find matching sno in services_list
+                        matched_sno = None
+                        for s in services_list:
+                            if str(s["service_id"]) == str(matched_sid):
+                                matched_sno = str(s["sno"])
+                                break
+                        if matched_sno:
+                            print(f"[LLM Router] Semantic match found: service_id {matched_sid} (sno {matched_sno}) with distance {distances[0]:.4f}")
+                            return {"sno": matched_sno, "service_id": str(matched_sid)}
+        except Exception as e:
+            print(f"[LLM Router] Semantic classification fallback failed: {e}")
 
     # 3. Fall back to LLM classification for complex/ambiguous queries or queries with spelling typos
     services_catalog_desc = "\n".join([

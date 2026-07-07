@@ -105,66 +105,69 @@ def normalize_query_terms(text: str) -> str:
     return normalized
 
 
-def detect_greeting(query: str) -> Optional[dict]:
+def _detect_query_language_simple(query: str) -> str:
     """
-    Detects if the query is a greeting/salutation and returns a warm response.
-    Returns None if the query is not a greeting.
-    Returns {"response": "..."} if it is a greeting.
+    Quick language detection for canned responses.
+    Returns 'hi' for Hindi (Devanagari), 'hinglish' for Romanized Hindi, 'en' for English.
     """
-    q_clean = re.sub(r'[!?.,।\s]+$', '', query.strip().lower())
+    # Check for Devanagari characters
+    if any('\u0900' <= c <= '\u097f' for c in query):
+        return "hi"
+    # Check for common Hinglish markers
+    hinglish_markers = {"kya", "hai", "ho", "hain", "kaun", "kaise", "kahan", "kab",
+                        "aap", "tum", "mujhe", "mera", "tera", "uska", "sab",
+                        "namaste", "namaskar", "shukriya", "dhanyavaad", "alvida",
+                        "haan", "nahi", "theek", "acha", "accha"}
+    words = set(re.sub(r'[!?.,।\s]+', ' ', query.strip().lower()).split())
+    if words & hinglish_markers:
+        return "hinglish"
+    return "en"
+
+
+def get_intent_response(intent: str, query: str) -> Optional[dict]:
+    """
+    Given a classified intent from the LLM classifier, returns the appropriate
+    canned response. Returns None if the intent requires RAG processing.
     
-    # Greeting responses by category
-    hello_patterns = {
-        "hi", "hello", "hey", "hii", "hiii", "helloo", "hellooo",
-        "good morning", "good afternoon", "good evening"
+    Handles: greeting, farewell, thanks, identity, out_of_scope
+    Does NOT handle: follow_up, new_topic (these go through RAG)
+    """
+    lang = _detect_query_language_simple(query)
+    
+    responses = {
+        "greeting": {
+            "en": "Hello! 🙏 Welcome to SewaSetu AI Assistant. How can I help you with Chhattisgarh government services today? You can ask about documents, fees, eligibility, or application process for any service.",
+            "hi": "नमस्ते! 🙏 सेवासेतु एआई सहायक में आपका स्वागत है। छत्तीसगढ़ सरकारी सेवाओं के बारे में मैं आपकी कैसे मदद कर सकता/सकती हूँ? आप किसी भी सेवा के दस्तावेज़, शुल्क, पात्रता या आवेदन प्रक्रिया के बारे में पूछ सकते हैं।",
+            "hinglish": "Namaste! 🙏 SewaSetu AI Assistant mein aapka swagat hai. Chhattisgarh sarkari sewaon ke baare mein main aapki kaise madad kar sakta/sakti hoon? Aap kisi bhi seva ke documents, fees, eligibility ya application process ke baare mein pooch sakte hain."
+        },
+        "farewell": {
+            "en": "Thank you for using SewaSetu! 🙏 Have a great day. Feel free to come back anytime you need help with government services.",
+            "hi": "सेवासेतु का उपयोग करने के लिए धन्यवाद! 🙏 आपका दिन शुभ हो। सरकारी सेवाओं में मदद के लिए कभी भी वापस आएं।",
+            "hinglish": "SewaSetu use karne ke liye dhanyavaad! 🙏 Aapka din shubh ho. Sarkari sewaon mein madad ke liye kabhi bhi wapas aayein."
+        },
+        "thanks": {
+            "en": "You're welcome! 🙏 Is there anything else I can help you with regarding Chhattisgarh government services?",
+            "hi": "आपका स्वागत है! 🙏 क्या छत्तीसगढ़ सरकारी सेवाओं के बारे में कोई और मदद चाहिए?",
+            "hinglish": "Aapka swagat hai! 🙏 Kya Chhattisgarh sarkari sewaon ke baare mein koi aur madad chahiye?"
+        },
+        "identity": {
+            "en": "I am **SewaSetu AI Assistant** 🤖 — a chatbot designed to help citizens with **Chhattisgarh government services** available on the Sewa Setu portal.\n\nI can help you with:\n- 📄 **Documents** required for any service\n- 💰 **Fees** and payment methods\n- ✅ **Eligibility** criteria\n- 🕐 **Timelines** (SLA) for service delivery\n- 📝 **Application process** and how to apply\n\nPlease ask me anything about these services!",
+            "hi": "मैं **सेवासेतु एआई सहायक** 🤖 हूँ — छत्तीसगढ़ सेवा सेतु पोर्टल पर उपलब्ध **सरकारी सेवाओं** में नागरिकों की मदद करने के लिए बनाया गया चैटबॉट।\n\nमैं इनमें मदद कर सकता/सकती हूँ:\n- 📄 किसी भी सेवा के लिए **आवश्यक दस्तावेज़**\n- 💰 **शुल्क** और भुगतान के तरीके\n- ✅ **पात्रता** मानदंड\n- 🕐 सेवा वितरण की **समयसीमा** (SLA)\n- 📝 **आवेदन प्रक्रिया**\n\nकृपया इन सेवाओं के बारे में कुछ भी पूछें!",
+            "hinglish": "Main **SewaSetu AI Assistant** 🤖 hun — Chhattisgarh Sewa Setu portal par uplabdh **sarkari sewaon** mein nagrikon ki madad karne ke liye banaya gaya chatbot.\n\nMain in cheezon mein madad kar sakta/sakti hun:\n- 📄 Kisi bhi seva ke liye **zaroori documents**\n- 💰 **Fees** aur payment ke tarike\n- ✅ **Eligibility** criteria\n- 🕐 Seva delivery ki **timeline** (SLA)\n- 📝 **Application process** aur kaise apply karein\n\nKripya in sewaon ke baare mein kuch bhi poochein!"
+        },
+        "out_of_scope": {
+            "en": "I can only help with **Chhattisgarh government services** available on the Sewa Setu portal. Please ask about documents, fees, eligibility, or application process for any service. 🙏",
+            "hi": "मैं केवल सेवा सेतु पोर्टल पर उपलब्ध **छत्तीसगढ़ सरकारी सेवाओं** में मदद कर सकता/सकती हूँ। कृपया किसी भी सेवा के दस्तावेज़, शुल्क, पात्रता या आवेदन प्रक्रिया के बारे में पूछें। 🙏",
+            "hinglish": "Main sirf **Chhattisgarh sarkari sewaon** mein madad kar sakta/sakti hun jo Sewa Setu portal par uplabdh hain. Kripya kisi bhi seva ke documents, fees, eligibility ya application process ke baare mein poochein. 🙏"
+        }
     }
-    hello_patterns_hi = {"नमस्ते", "नमस्कार", "हेलो", "हाय", "हैलो"}
-    hello_patterns_hinglish = {"namaste", "namaskar", "namaskaar", "pranam"}
     
-    bye_patterns = {"bye", "byee", "goodbye", "good bye", "see you", "take care", "good night"}
-    bye_patterns_hi = {"अलविदा", "बाय"}
-    bye_patterns_hinglish = {"alvida"}
-    
-    thanks_patterns = {"thanks", "thank you", "thankyou", "thank u", "thnx", "thnks", "ty"}
-    thanks_patterns_hi = {"धन्यवाद", "शुक्रिया"}
-    thanks_patterns_hinglish = {"dhanyavaad", "dhanyawad", "shukriya"}
-    
-    ok_patterns = {"ok", "okay", "okk", "okkk", "hmm", "hmmm"}
-    ok_patterns_hi = {"ठीक है", "ठीक", "जी", "जी हाँ", "हाँ"}
-    ok_patterns_hinglish = {"haan", "theek hai", "thik hai", "acha", "accha", "achha"}
-    
-    # Detect language for response
-    is_hindi = any('\u0900' <= c <= '\u097f' for c in query)
-    
-    if q_clean in hello_patterns:
-        return {"response": "Hello! 🙏 Welcome to SewaSetu AI Assistant. How can I help you with Chhattisgarh government services today? You can ask about documents, fees, eligibility, or application process for any service."}
-    elif q_clean in hello_patterns_hi:
-        return {"response": "नमस्ते! 🙏 सेवासेतु एआई सहायक में आपका स्वागत है। छत्तीसगढ़ सरकारी सेवाओं के बारे में मैं आपकी कैसे मदद कर सकता/सकती हूँ? आप किसी भी सेवा के दस्तावेज़, शुल्क, पात्रता या आवेदन प्रक्रिया के बारे में पूछ सकते हैं।"}
-    elif q_clean in hello_patterns_hinglish:
-        return {"response": "Namaste! 🙏 SewaSetu AI Assistant mein aapka swagat hai. Chhattisgarh sarkari sewaon ke baare mein main aapki kaise madad kar sakta/sakti hoon? Aap kisi bhi seva ke documents, fees, eligibility ya application process ke baare mein pooch sakte hain."}
-    
-    elif q_clean in bye_patterns:
-        return {"response": "Thank you for using SewaSetu! 🙏 Have a great day. Feel free to come back anytime you need help with government services."}
-    elif q_clean in bye_patterns_hi:
-        return {"response": "सेवासेतु का उपयोग करने के लिए धन्यवाद! 🙏 आपका दिन शुभ हो। सरकारी सेवाओं में मदद के लिए कभी भी वापस आएं।"}
-    elif q_clean in bye_patterns_hinglish:
-        return {"response": "SewaSetu use karne ke liye dhanyavaad! 🙏 Aapka din shubh ho. Sarkari sewaon mein madad ke liye kabhi bhi wapas aayein."}
-    
-    elif q_clean in thanks_patterns:
-        return {"response": "You're welcome! 🙏 Is there anything else I can help you with regarding Chhattisgarh government services?"}
-    elif q_clean in thanks_patterns_hi:
-        return {"response": "आपका स्वागत है! 🙏 क्या छत्तीसगढ़ सरकारी सेवाओं के बारे में कोई और मदद चाहिए?"}
-    elif q_clean in thanks_patterns_hinglish:
-        return {"response": "Aapka swagat hai! 🙏 Kya Chhattisgarh sarkari sewaon ke baare mein koi aur madad chahiye?"}
-    
-    elif q_clean in ok_patterns:
-        return {"response": "Alright! 👍 Let me know if you have any questions about Chhattisgarh government services."}
-    elif q_clean in ok_patterns_hi:
-        return {"response": "ठीक है! 👍 छत्तीसगढ़ सरकारी सेवाओं के बारे में कोई सवाल हो तो बताइए।"}
-    elif q_clean in ok_patterns_hinglish:
-        return {"response": "Theek hai! 👍 Chhattisgarh sarkari sewaon ke baare mein koi sawal ho toh bataiye."}
+    if intent in responses:
+        return {"response": responses[intent].get(lang, responses[intent]["en"])}
     
     return None
+
+
 
 
 def sanitize_history(messages: Optional[list]) -> list:
@@ -204,18 +207,35 @@ def sanitize_history(messages: Optional[list]) -> list:
     return clean
 
 
+def query_contains_service_keywords(query: str, resolved_query: str, service_id: int) -> bool:
+    """
+    Checks if the user query or the resolved query contains keywords matching the given service_id.
+    Helps in detecting explicit service switches.
+    """
+    q = (query + " " + resolved_query).lower()
+    keywords = {
+        3: ["marriage", "shadi", "shaadi", "विवाह", "शादी"],
+        4: ["sc", "st", "caste", "jati", "जाति", "एससी", "एसटी"],
+        5: ["obc", "caste", "jati", "पिछड़ा", "ओबीसी"],
+        7: ["domicile", "resident", "niwas", "निवास", "निवासी", "मूल निवासी"],
+        201: ["name change", "gazette", "नाम", "परिवर्तन", "राजपत्र"]
+    }
+    return any(kw in q for kw in keywords.get(service_id, []))
+
+
 def build_condensed_history(sanitized_history: list, is_follow_up: bool, topic_summary: str = "") -> list:
     """
     Builds a condensed history for the final synthesis stage only.
     
-    - For follow-ups: includes last 2 turns + a topic summary line
+    - For follow-ups: includes last 1 turn (2 messages) + a topic summary line
+      Only 1 turn to prevent cross-service contamination when switching topics
     - For new topics: returns empty (no history needed)
     """
     if not is_follow_up or not sanitized_history:
         return []
     
-    # Take only the last 4 messages (2 turns)
-    recent = sanitized_history[-4:]
+    # Take only the last 2 messages (1 turn) — prevents older service context from leaking
+    recent = sanitized_history[-2:]
     
     condensed = []
     if topic_summary:
@@ -227,8 +247,8 @@ def build_condensed_history(sanitized_history: list, is_follow_up: bool, topic_s
     for msg in recent:
         content = msg["content"]
         # Truncate long assistant responses to keep context focused
-        if msg["role"] == "assistant" and len(content) > 400:
-            content = content[:400] + "\n... (truncated for brevity)"
+        if msg["role"] == "assistant" and len(content) > 300:
+            content = content[:300] + "\n... (truncated for brevity)"
         condensed.append({"role": msg["role"], "content": content})
     
     return condensed
@@ -572,7 +592,8 @@ async def run_rag_pipeline_intermediates(
                 "- If asked about documents → respond ONLY with document information. Do NOT mention eligibility, fees, process, or timelines.\n"
                 "- If asked about timeline/SLA → respond ONLY with the timeline. Do NOT mention anything else.\n"
                 "- If asked about a single specific document → answer ONLY about that document. Do NOT list all documents.\n"
-                "Adding unrequested information is STRICTLY FORBIDDEN.\n\n"
+                "Adding unrequested information is STRICTLY FORBIDDEN.\n"
+                "BREVITY: For single-aspect questions (timeline, fees, etc.), answer in 2-5 lines MAX. Do NOT dump full service overview.\n\n"
                 "You are a polite government services assistant for the Sewa Setu Chhattisgarh portal.\n"
                 "Answer using ONLY the provided context. Output ENTIRELY in English (Roman alphabet only).\n"
                 "Be warm and respectful. Use markdown formatting with bullet points.\n"
@@ -603,7 +624,8 @@ async def run_rag_pipeline_intermediates(
                 "- पात्रता पूछी गई → केवल पात्रता बताएं। दस्तावेज, शुल्क, प्रक्रिया या समयसीमा न जोड़ें।\n"
                 "- दस्तावेज पूछे गए → केवल दस्तावेज बताएं। पात्रता, शुल्क, प्रक्रिया या समयसीमा न जोड़ें।\n"
                 "- एक विशिष्ट दस्तावेज पूछा गया → केवल उसी दस्तावेज के बारे में बताएं। पूरी सूची न दें।\n"
-                "अनावश्यक जानकारी जोड़ना सख्त वर्जित है।\n\n"
+                "अनावश्यक जानकारी जोड़ना सख्त वर्जित है।\n"
+                "संक्षिप्तता: एकल-पहलू प्रश्नों (समयसीमा, शुल्क, आदि) के लिए 2-5 पंक्तियों में उत्तर दें। पूरी सेवा जानकारी न दें।\n\n"
                 "आप सेवा सेतु छत्तीसगढ़ पोर्टल के सहायक हैं।\n"
                 "केवल संदर्भ की जानकारी से उत्तर दें। देवनागरी लिपि में उत्तर दें।\n"
                 "विनम्र रहें। मार्कडाउन और बुलेट पॉइंट का उपयोग करें।\n"
@@ -746,10 +768,14 @@ Your ENTIRE response must address ONLY the specific question the citizen asked. 
 - If asked about fees → respond ONLY with fee details. Do NOT mention documents, eligibility, process, or timelines.
 - If asked about eligibility → respond ONLY with eligibility criteria. Do NOT mention documents, fees, process, or timelines.
 - If asked about documents → respond ONLY with document information. Do NOT mention eligibility, fees, process, or timelines.
-- If asked about timeline/SLA → respond ONLY with the timeline. Do NOT mention anything else.
+- If asked about timeline/SLA → respond ONLY with the timeline/SLA number. Do NOT list documents, fees, process, or anything else.
 - If asked about how to apply → respond ONLY with application process. Do NOT mention documents, eligibility, fees, or timelines.
 - If asked about a single specific document → answer ONLY about that document. Do NOT list all documents.
-- A short, precise, focused answer is ALWAYS better than a long one.
+
+BREVITY RULE: A short, precise, focused answer is ALWAYS better than a long one.
+- For single-aspect questions (like "how many days?" or "what is the fee?"), your answer should be 2-5 lines MAX.
+- NEVER dump the full service overview when only one aspect is asked.
+- VIOLATION EXAMPLE: If asked "kitne din lagenge?" (how many days?), responding with documents list + fees + timeline + registration process is WRONG. Only the timeline number is correct.
 
 You are SewaSetu AI Assistant — a polite government services assistant for the Chhattisgarh Sewa Setu portal.
 - LANGUAGE AND SCRIPT RULES: {lang_instruction}
@@ -957,7 +983,8 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
         filtered_sanitized.append(msg)
     sanitized = filtered_sanitized
 
-    # Classify query intent: greeting/follow_up/new_topic
+    # Classify query intent FIRST — needs full history to understand follow-ups
+    # e.g., "kitne din lagenge banne me?" needs to see marriage context in history
     intent_result = await asyncio.to_thread(
         classify_query_intent, query, sanitized
     )
@@ -967,10 +994,45 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     
     print(f"[RAG Pipeline] Intent: {intent}, Resolved query: '{resolved_query}', Topic: '{topic_summary}'")
 
+    # === INTERCEPT non-RAG intents (greeting, farewell, thanks, identity, out_of_scope) ===
+    intent_response = get_intent_response(intent, query)
+    if intent_response:
+        print(f"[RAG Pipeline] Intent '{intent}' intercepted -> returning canned response")
+        return intent_response
+
     # Always use resolved_query for RAG retrieval — the classifier now produces
     # a self-contained query for BOTH intents (with aspect carry-over for new_topic)
     rag_query = resolved_query
     is_follow_up = (intent == "follow_up")
+
+    # Check if target service has switched compared to history
+    # Extract service ID from last assistant message's link
+    # This affects ONLY synthesis history, NOT the classifier (which already ran)
+    last_service_id = None
+    for msg in reversed(sanitized):
+        if msg["role"] == "assistant":
+            match = re.search(r'serviceId=(\d+)', msg["content"])
+            if match:
+                last_service_id = int(match.group(1))
+                break
+    
+    if last_service_id and service_id and last_service_id != service_id:
+        # Check if the query itself explicitly contains keywords of the current service_id
+        if is_follow_up and query_contains_service_keywords(query, resolved_query, service_id):
+            print(f"[RAG Pipeline] SAFETY: Query contains keywords of the new service ({service_id}) which differs from history ({last_service_id}). Forcing new_topic.")
+            is_follow_up = False
+            intent = "new_topic"
+
+        if is_follow_up:
+            # Classifier says follow_up — user is continuing the conversation topic,
+            # not the sidebar selection. Trust the classifier: use conversation's service_id.
+            print(f"[RAG Pipeline] Follow-up detected but sidebar service ({service_id}) differs from conversation service ({last_service_id}). Trusting classifier → using service_id={last_service_id}")
+            service_id = last_service_id
+        else:
+            # New topic with a different sidebar service — clear history for synthesis
+            print(f"[RAG Pipeline] Service switch detected (history={last_service_id}, sidebar={service_id}). Clearing history for synthesis.")
+            sanitized = []
+            is_follow_up = False
 
     # SAFETY CHECK: Detect misclassified topic switches
     # If the classifier says follow_up but the topic_summary mentions "different service",
@@ -990,7 +1052,11 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     # Without re-translation, RAG would search for vague "what about marriage?" and get ALL chunks
     if rag_query.lower().strip() != query.lower().strip():
         print(f"[RAG Pipeline] Re-translating resolved query for RAG: '{rag_query}'")
-        query_lang, english_query, hindi_query = await process_query_languages(rag_query)
+        # Preserve original user language — resolved query is often English but user may be Hinglish/Hindi
+        original_query_lang = query_lang
+        _, english_query, hindi_query = await process_query_languages(rag_query)
+        query_lang = original_query_lang  # Keep user's language for synthesis response
+        print(f"[RAG Pipeline] Preserved original query_lang: '{query_lang}'")
 
     # Use the resolved query + re-translated languages for RAG retrieval
     query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg = await run_rag_pipeline_intermediates(
@@ -1012,8 +1078,10 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
             }
         return {"response": fallback_msg}
             
+
+
     return await synthesize_consensus_response(
-        query, query_lang, english_query, hindi_query,
+        rag_query, query_lang, english_query, hindi_query,
         context_en, context_hi, english_answer, hindi_answer, fallback_msg,
         request, service_id, condensed_history=condensed
     )
@@ -1041,12 +1109,6 @@ async def chat_with_bot(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Query text is required.")
 
     query = normalize_query_terms(query)
-
-    # === GREETING INTERCEPTOR (before any LLM/RAG calls) ===
-    greeting_result = detect_greeting(query)
-    if greeting_result:
-        print(f"[API Chat] Greeting detected: '{query}' -> responding with canned greeting")
-        return {"response": greeting_result["response"]}
 
     # 2. Resolve service_id / sno
     service_id = None

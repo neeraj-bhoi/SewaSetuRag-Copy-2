@@ -587,118 +587,94 @@ def classify_service(query: str, services_list: List[Dict[str, Any]]) -> Dict[st
 
 def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> Dict[str, str]:
     """
-    Classifies a user query as 'greeting', 'follow_up', or 'new_topic' based on conversation history.
-    For follow-ups, rewrites the query into a self-contained form.
+    Classifies a user query using an LLM into one of:
+      'greeting', 'farewell', 'thanks', 'identity', 'out_of_scope',
+      'follow_up', or 'new_topic'.
+    
+    No hardcoded word lists — the LLM handles spelling variations, typos,
+    and multilingual inputs (English, Hindi, Hinglish) naturally.
     
     Returns:
         {
-            "intent": "greeting" | "follow_up" | "new_topic",
-            "resolved_query": "the self-contained rewritten query (or original if new_topic/greeting)",
-            "topic_summary": "1-line summary of what the conversation is about"
+            "intent": one of the above intents,
+            "resolved_query": "self-contained rewritten query (for follow_up/new_topic)",
+            "topic_summary": "1-line summary"
         }
     """
-    if not query:
-        return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
+    if not query or not query.strip():
+        return {"intent": "new_topic", "resolved_query": query or "", "topic_summary": ""}
 
-    # Fast rule-based greeting detection (no LLM needed)
-    q_stripped = query.strip().lower()
-    # Remove trailing punctuation for matching
-    q_clean = re.sub(r'[!?.,।\s]+$', '', q_stripped)
-    
-    greeting_patterns = {
-        # English greetings
-        "hi", "hello", "hey", "hii", "hiii", "helloo", "hellooo",
-        "good morning", "good afternoon", "good evening", "good night",
-        # English farewells
-        "bye", "byee", "goodbye", "good bye", "see you", "take care",
-        # English thanks
-        "thanks", "thank you", "thankyou", "thank u", "thnx", "thnks", "ty",
-        # English pleasantries
-        "ok", "okay", "okk", "okkk", "yes", "no", "hmm", "hmmm",
-        "please", "plz", "pls",
-        # Hindi greetings (Devanagari)
-        "नमस्ते", "नमस्कार", "हेलो", "हाय", "हैलो",
-        # Hindi farewells
-        "अलविदा", "बाय", "धन्यवाद", "शुक्रिया",
-        # Hindi pleasantries
-        "जी", "जी हाँ", "जी नहीं", "हाँ", "नहीं", "ठीक है", "ठीक",
-        # Hinglish greetings
-        "namaste", "namaskar", "namaskaar", "pranam",
-        "dhanyavaad", "dhanyawad", "shukriya", "alvida",
-        "haan", "nahi", "nhi", "theek hai", "thik hai",
-        "acha", "accha", "achha"
-    }
-    
-    if q_clean in greeting_patterns:
-        return {"intent": "greeting", "resolved_query": query, "topic_summary": ""}
-
-    # If no history, it's definitely a new topic — no need for LLM call
-    if not recent_history or len(recent_history) == 0:
-        return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
-
-    # Build structured history with EXPLICIT recency markers
-    # Split into: older context (background) and most recent exchange (current topic)
-    history_msgs = recent_history[-4:]  # Last 2 turns max
-    
+    # Build structured history for context (only needed for follow_up/new_topic)
     history_str = ""
-    
-    if len(history_msgs) >= 4:
-        # 2 turns: show older as background, most recent as current topic
-        # Older turn (background)
-        history_str += "OLDER CONTEXT (background only, NOT the current topic):\n"
-        for msg in history_msgs[:2]:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if content:
-                if role == "assistant" and len(content) > 150:
-                    content = content[:150] + "..."
-                history_str += f"  {role.upper()}: {content}\n"
+    if recent_history and len(recent_history) > 0:
+        history_msgs = recent_history[-4:]  # Last 2 turns max
         
-        # Most recent turn (CURRENT TOPIC)
-        history_str += "\nMOST RECENT EXCHANGE (THIS IS THE CURRENT TOPIC):\n"
-        for msg in history_msgs[2:]:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if content:
-                if role == "assistant" and len(content) > 150:
-                    content = content[:150] + "..."
-                history_str += f"  {role.upper()}: {content}\n"
-    else:
-        # 1 turn or less: everything is the current topic
-        history_str += "MOST RECENT EXCHANGE (THIS IS THE CURRENT TOPIC):\n"
-        for msg in history_msgs:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if content:
-                if role == "assistant" and len(content) > 150:
-                    content = content[:150] + "..."
-                history_str += f"  {role.upper()}: {content}\n"
+        if len(history_msgs) >= 4:
+            history_str += "OLDER CONTEXT (background only, NOT the current topic):\n"
+            for msg in history_msgs[:2]:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    if role == "assistant" and len(content) > 150:
+                        content = content[:150] + "..."
+                    history_str += f"  {role.upper()}: {content}\n"
+            
+            history_str += "\nMOST RECENT EXCHANGE (THIS IS THE CURRENT TOPIC):\n"
+            for msg in history_msgs[2:]:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    if role == "assistant" and len(content) > 150:
+                        content = content[:150] + "..."
+                    history_str += f"  {role.upper()}: {content}\n"
+        else:
+            history_str += "MOST RECENT EXCHANGE (THIS IS THE CURRENT TOPIC):\n"
+            for msg in history_msgs:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    if role == "assistant" and len(content) > 150:
+                        content = content[:150] + "..."
+                    history_str += f"  {role.upper()}: {content}\n"
 
+    history_block = f"CONVERSATION HISTORY:\n{history_str}\n" if history_str else "CONVERSATION HISTORY: (none)\n"
 
     prompt = (
-        "You are a query classifier for a government services chatbot. Given a conversation history and the user's latest query, classify the intent and produce a self-contained resolved query.\n\n"
-        "RECENCY RULE (HIGHEST PRIORITY):\n"
-        "The MOST RECENT service/topic in the conversation is the current context. When a user's query refers to something implicitly (e.g., 'the cost', 'its documents', 'how long'), they are ALWAYS referring to the MOST RECENT service discussed — never an older one.\n\n"
-        "CLASSIFICATION RULES:\n"
-        "1. new_topic: The query mentions or names a DIFFERENT service/certificate/scheme than the MOST RECENT one in history. This applies even with connective words like 'aur' (and), 'what about', 'how about', 'bhi' (also).\n"
-        "2. follow_up: The query asks about the SAME service as the MOST RECENT one in history — either a different aspect (fees, documents, eligibility, timeline) or a correction/clarification of the previous answer.\n\n"
-        "RESOLVED QUERY RULES (applies to BOTH intents):\n"
-        "- ALWAYS produce a fully self-contained resolved_query that includes the service name AND the specific aspect.\n"
-        "- For follow_up: Replace pronouns/implicit references with the MOST RECENT service name from history.\n"
-        "- For new_topic with aspect carry-over: If the query is short and references a new service but the ASPECT is implied from the previous conversation (e.g., 'what about Service B?' after discussing fees of Service A), carry over the aspect into the resolved_query (e.g., 'what are the fees for Service B?').\n"
-        "- For new_topic that is fully self-contained: Keep the resolved_query as the original query.\n\n"
-        "CONSISTENCY CHECK (MANDATORY):\n"
-        "If your resolved_query contains a DIFFERENT service name than the most recent service in the conversation history, the intent MUST be new_topic. Never label it as follow_up if the resolved service is different from the history service.\n\n"
-        f"CONVERSATION HISTORY:\n{history_str}\n"
+        "You are a query classifier for a Chhattisgarh government services chatbot (SewaSetu). "
+        "Classify the user's latest query into EXACTLY ONE intent.\n\n"
+        "INTENT CATEGORIES (choose exactly one):\n"
+        "1. greeting — Any hello/hi/hey/good morning type salutation, in any language or spelling. "
+        "Examples: 'hi', 'hii', 'hello', 'namaste', 'namaskar', 'hey there', 'helo', 'hlw', 'good morning'\n"
+        "2. farewell — Any goodbye/bye/see you type farewell. "
+        "Examples: 'bye', 'goodbye', 'alvida', 'good night', 'see you'\n"
+        "3. thanks — Any thank you/thanks/appreciation or simple acknowledgement like ok/okay/hmm/yes/haan/theek hai/acha. "
+        "Examples: 'thanks', 'thank you', 'shukriya', 'dhanyavaad', 'ok', 'okay', 'hmm', 'acha', 'theek hai', 'haan'\n"
+        "4. identity — User is asking who/what the chatbot is, what it can do, or asking it to introduce itself. "
+        "Examples: 'who are you', 'aap kaun ho', 'tum kaun ho', 'ye kya hai', 'what can you do', 'what is sewasetu'\n"
+        "5. out_of_scope — The query is NOT about Chhattisgarh government services. This includes politics, general knowledge, celebrities, weather, sports, entertainment, math, coding, personal advice, or any topic unrelated to government services/certificates/documents/fees. "
+        "Examples: 'modi kaun hai', 'who is the president', 'what is the weather', 'tell me a joke', '2+2 kya hai', 'capital of India'\n"
+        "6. follow_up — The query asks about the SAME government service/certificate as the MOST RECENT one in the conversation history — either a different aspect (fees, documents, eligibility, timeline) or a clarification. "
+        "Examples: 'what is the fee?', 'documents needed?', 'how long does it take?', 'eligibility criteria?' (when referring to the SAME service currently being discussed).\n"
+        "7. new_topic — The query is about a Chhattisgarh government service but refers to or names a DIFFERENT service/certificate than the one in the conversation history, OR it is the first service query with no history. "
+        "Examples: 'and for marriage?', 'what about birth certificate?', 'caste certificate fees?' (when the previous topic was name change or domicile).\n\n"
+        "CRITICAL SERVICE SWITCH RULE:\n"
+        "- If the latest query refers to or mentions a DIFFERENT service (e.g., Marriage Certificate) than the most recent service discussed (e.g., Name Change), the intent MUST be 'new_topic'. It is NEVER a 'follow_up'.\n"
+        "- Even if the query is short and relies on carrying over the aspect from history (e.g., 'and for marriage?' asking about fees after discussing name change fees), it is still a 'new_topic' because the service itself has changed.\n\n"
+        "IMPORTANT RULES:\n"
+        "- For greeting/farewell/thanks/identity/out_of_scope: set resolved_query to the original query and topic_summary to empty string.\n"
+        "- For follow_up: rewrite resolved_query to be fully self-contained with the service name and aspect.\n"
+        "- For new_topic: if the query is short and the ASPECT is implied from history (e.g., 'what about marriage?' after discussing fees of name change), carry over the aspect into the resolved_query (e.g., 'What is the cost for marriage registration?').\n"
+        "- RECENCY RULE: implicit references ('the cost', 'its documents') without naming any new service ALWAYS refer to the MOST RECENT service discussed.\n"
+        "- CONSISTENCY CHECK: if resolved_query references a DIFFERENT service than history, intent MUST be 'new_topic'.\n"
+        "- The query can be in English, Hindi (Devanagari), Hinglish, or have typos — classify based on meaning, not exact spelling.\n\n"
+        f"{history_block}"
         f"LATEST USER QUERY: {query}\n\n"
         "Respond with ONLY a JSON object (no markdown, no code fences, no explanation):\n"
-        '{"intent": "follow_up" or "new_topic", "resolved_query": "fully self-contained rewritten query with service name and aspect", "topic_summary": "1-line summary"}\n'
+        '{"intent": "greeting|farewell|thanks|identity|out_of_scope|follow_up|new_topic", "resolved_query": "...", "topic_summary": "..."}\n'
         "JSON:"
     )
 
-
-
-
+    valid_intents = {"greeting", "farewell", "thanks", "identity", "out_of_scope", "follow_up", "new_topic"}
 
     try:
         headers = {
@@ -737,7 +713,7 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
                 summary = result.get("topic_summary", "")
                 
                 # Validate intent value
-                if intent not in ("follow_up", "new_topic", "greeting"):
+                if intent not in valid_intents:
                     intent = "new_topic"
                 
                 # Safety: if resolved_query is empty, fall back to original
@@ -753,3 +729,4 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
     
     # Fallback: treat as new topic
     return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
+

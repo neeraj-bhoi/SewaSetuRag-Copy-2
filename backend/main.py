@@ -19,7 +19,8 @@ try:
         detect_query_language, 
         translate_query_to_english,
         translate_query_to_hindi,
-        classify_query_intent
+        classify_query_intent,
+        llm_trace
     )
 except ImportError:
     from rag import retrieve_context
@@ -29,7 +30,8 @@ except ImportError:
         detect_query_language, 
         translate_query_to_english,
         translate_query_to_hindi,
-        classify_query_intent
+        classify_query_intent,
+        llm_trace
     )
 
 
@@ -105,6 +107,26 @@ def normalize_query_terms(text: str) -> str:
     return normalized
 
 
+def is_info_not_available(ans: str) -> bool:
+    """
+    Checks if the response indicates that the information is not available in the records.
+    Normalizes the text to handle variations in punctuation, casing, language, and spacing.
+    """
+    if not ans:
+        return True
+    clean = re.sub(r'[^a-zA-Z0-9\u0900-\u097f\s]', '', ans).strip().lower()
+    # English patterns
+    if "information not available" in clean or "not available in my records" in clean or "insufficient information" in clean or "sufficient information" in clean or "records do not contain" in clean:
+        return True
+    # Hindi patterns
+    if "जानकारी उपलब्ध नहीं" in clean or "पर्याप्त जानकारी नहीं" in clean or "रिकॉर्ड में पर्याप्त जानकारी नहीं" in clean:
+        return True
+    # Hinglish patterns
+    if "jaankari uplabhd nahi" in clean or "jaankari uplabdha nahi" in clean or "uplabdh nahi" in clean or "paryapt jankari" in clean or "paryapt information" in clean or "uttar dene" in clean:
+        return True
+    return False
+
+
 def _detect_query_language_simple(query: str) -> str:
     """
     Quick language detection for canned responses.
@@ -117,7 +139,10 @@ def _detect_query_language_simple(query: str) -> str:
     hinglish_markers = {"kya", "hai", "ho", "hain", "kaun", "kaise", "kahan", "kab",
                         "aap", "tum", "mujhe", "mera", "tera", "uska", "sab",
                         "namaste", "namaskar", "shukriya", "dhanyavaad", "alvida",
-                        "haan", "nahi", "theek", "acha", "accha"}
+                        "haan", "nahi", "theek", "acha", "accha", "mein", "ki",
+                        "ke", "ka", "se", "ko", "aur", "bhi", "toh", "hoga", "hogi",
+                        "karna", "karne", "karo", "kariye", "kitna", "kitni",
+                        "kitne", "kyun", "apna", "apni", "apne", "hum"}
     words = set(re.sub(r'[!?.,।\s]+', ' ', query.strip().lower()).split())
     if words & hinglish_markers:
         return "hinglish"
@@ -513,164 +538,46 @@ async def run_rag_pipeline_intermediates(
     hindi_query: Optional[str] = None
 ):
     """
-    Runs language processing, context retrieval, and intermediate response generation (async).
+    Runs language processing and context retrieval concurrently (async).
     """
     query = normalize_query_terms(query)
     if not query_lang or not english_query or not hindi_query:
         query_lang, english_query, hindi_query = await process_query_languages(query)
 
+    if query_lang == "en":
+        fallback_msg = "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal."
+    elif query_lang == "hi":
+        fallback_msg = "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।"
+    else:
+        fallback_msg = "Main aapke prashn ka uttar dene ke liye paryapt jankari nahi rakhta. Kripya Sewa Setu portal par jaanch karein."
+
     if service_id is None:
-        if query_lang == "en":
-            fallback_msg = "Information not available."
-        elif query_lang == "hi":
-            fallback_msg = "जानकारी उपलब्ध नहीं है।"
-        else:
-            fallback_msg = "Jaankari uplabhd nahi hai."
-        return query_lang, english_query, hindi_query, "", "", "Information not available.", "जानकारी उपलब्ध नहीं है।", fallback_msg
+        return query_lang, english_query, hindi_query, "", "", fallback_msg
 
     # Retrieve English and Hindi contexts concurrently
     context_en_task = asyncio.to_thread(retrieve_context, query, service_id, 6, english_query, hindi_query, "en")
     context_hi_task = asyncio.to_thread(retrieve_context, query, service_id, 6, english_query, hindi_query, "hi")
     (context_en, metadata_en, checklist_text_en), (context_hi, metadata_hi, checklist_text_hi) = await asyncio.gather(context_en_task, context_hi_task)
 
-    if query_lang == "en":
-        fallback_msg = "Information not available."
-    elif query_lang == "hi":
-        fallback_msg = "जानकारी उपलब्ध नहीं है।"
-    else:
-        fallback_msg = "Jaankari uplabhd nahi hai."
+    return query_lang, english_query, hindi_query, context_en, context_hi, fallback_msg
 
-    if not context_en and not context_hi:
-        return query_lang, english_query, hindi_query, "", "", "Information not available.", "जानकारी उपलब्ध नहीं है।", fallback_msg
 
-    # NOTE: NO history is passed to intermediate calls.
-    # History is only used in the final synthesis stage (condensed form).
-    # This prevents the triple-amplification problem.
-
-    # Build dynamic service-specific rules
-    service_rules_en = ""
-    service_rules_hi = ""
-    if service_id is not None:
-        if int(service_id) == 7:
-            service_rules_en = (
-                "- ELIGIBILITY (Domicile): If the citizen asks about eligibility or exceptions for Domicile Certificate, explain the rules strictly according to the context:\n"
-                "  1. Main Path (Both Criteria One AND Criteria Two must be met): The applicant must satisfy AT LEAST ONE option from Criteria One (Criteria A) AND AT LEAST ONE option from Criteria Two (Criteria B). You MUST list Criteria One and Criteria Two under separate, clearly-labeled headers or bullet points.\n"
-                "     * Criteria One (Criteria A) options: Birth in CG, parent resident for 25 years, parent is CG Government/PSU employee, or property in CG for 5 years.\n"
-                "     * Criteria Two (Criteria B) options: 3 years of school study in CG, or passing Class 5, 8, 10, 12 board exam from CG.\n"
-                "     * Never merge them into one list and never omit the education requirements of Criteria Two.\n"
-                "  2. Exceptions (Criteria Three / Criteria C): If they do not meet the Main Path (for example, if they lack 'Proof of 15 Years Stay' or did not study in CG), they are still eligible under the exceptions of Criteria Three (C). Under Criteria Three (C), Criteria A and B are NOT required. The exceptions are: (a) spouse is a domicile of CG, (b) applicant or spouse is a CG Government/PSU employee, or (c) applicant or parent is in All India Services and allotted CG Cadre.\n"
-                "  3. Clarity: Do NOT say that Criteria Three requires stay proof or education. Clearly explain that Criteria Three is a standalone set of exceptions that bypasses the need for the stay proof or CG education requirements of Criteria One and Two.\n"
-                "  Do NOT assume ineligibility if there is ANY criterion in the context that could apply to the citizen's situation. Present all relevant criteria to the citizen.\n"
-            )
-            service_rules_hi = (
-                "- पात्रता (Domicile Eligibility): यदि नागरिक मूल निवासी प्रमाण पत्र (Domicile) के लिए पात्रता या अपवादों के बारे में पूछता है, तो संदर्भ के आधार पर सख्ती से समझाएं:\n"
-                "  1. मुख्य मार्ग (Main Path): आवेदक को Criteria One (जिसे Criteria A भी कहा जाता है) से कम से कम एक विकल्प और Criteria Two (जिसे Criteria B भी कहा जाता है) से कम से कम एक विकल्प दोनों को पूरा करना होगा। आपको Criteria One और Criteria Two को अलग-अलग शीर्षकों (headers) या बुलेट पॉइंट्स के तहत सूचीबद्ध करना होगा।\n"
-                "     * Criteria One (Criteria A) के विकल्प: छत्तीसगढ़ में जन्म, माता-पिता का 25 वर्ष का निवास, माता-पिता का सरकारी/PSU कर्मचारी होना, या 5 वर्ष की संपत्ति होना।\n"
-                "     * Criteria Two (Criteria B) के विकल्प: CG में 3 वर्ष की स्कूल शिक्षा, या CG से 5वीं, 8वीं, 10वीं, 12वीं की बोर्ड परीक्षा उत्तीर्ण होना।\n"
-                "     * इन्हें कभी भी एक सूची में न मिलाएँ और Criteria Two (शिक्षा की आवश्यकता) के विकल्पों को कभी न छोड़ें।\n"
-                "  2. अपवाद (Criteria Three / Criteria C): यदि वे मुख्य मार्ग को पूरा नहीं करते हैं (उदाहरण के लिए, यदि उनके पास 15 वर्ष का निवास प्रमाण नहीं है या CG में पढ़ाई नहीं की है), तो भी वे Criteria Three (C) के अपवादों के तहत पात्र हैं। Criteria Three (C) के लिए Criteria A और B की आवश्यकता नहीं होती है। ये अपवाद हैं: (क) जीवनसाथी (spouse) छत्तीसगढ़ का मूल निवासी हो, (ख) आवेदक या जीवनसाथी छत्तीसगढ़ सरकार/PSU का कर्मचारी हो, या (ग) आवेदक या माता-पिता अखिल भारतीय सेवाओं (All India Services) में हों और उन्हें CG कैडर आवंटित किया गया हो।\n"
-                "  3. स्पष्टता: कभी भी यह न कहें कि Criteria Three के लिए निवास प्रमाण या शिक्षा की आवश्यकता है। स्पष्ट रूप से समझाएं कि Criteria Three एक स्वतंत्र अपवाद है जो Criteria One और Two (निवास प्रमाण और शिक्षा) की आवश्यकता को समाप्त करता है।\n"
-                "  यदि संदर्भ में कोई भी मानदंड नागरिक की स्थिति पर लागू हो सकता है, तो अपात्रता न मानें।\n"
-            )
-        elif int(service_id) == 3:
-            service_rules_en = (
-                "- MARRIAGE JURISDICTION: For Marriage registration queries, always clarify that a marriage must be registered in the local area where it was solemnized/performed (not in the couple's hometown or place of residence), and with the appropriate local authority of that area (Gram Panchayat if rural; Municipality/Municipal Corporation if urban).\n"
-            )
-            service_rules_hi = (
-                "- विवाह पंजीकरण क्षेत्र: विवाह पंजीकरण के प्रश्नों के लिए हमेशा स्पष्ट करें कि विवाह का पंजीकरण उसी स्थानीय क्षेत्र में होना चाहिए जहां वह संपन्न हुआ है (न कि वर-वधू के गृहनगर या निवास स्थान पर), और उसी क्षेत्र के उपयुक्त स्थानीय निकाय (ग्रामीण के लिए ग्राम पंचायत; शहरी के लिए नगर पालिका/नगर निगम) में होना चाहिए।\n"
-            )
-
-    # Generate Intermediate English Answer — NO HISTORY, only RAG context + query
-    messages_en = [
-        {
-            "role": "system",
-            "content": (
-                "STRICT ANSWER-ONLY RULE (HIGHEST PRIORITY):\n"
-                "Your ENTIRE response must address ONLY the specific question asked. Do NOT add ANY extra information.\n"
-                "- If asked about fees → respond ONLY with fee details. Do NOT mention documents, eligibility, process, or timelines.\n"
-                "- If asked about eligibility → respond ONLY with eligibility criteria. Do NOT mention documents, fees, process, or timelines.\n"
-                "- If asked about documents → respond ONLY with document information. Do NOT mention eligibility, fees, process, or timelines.\n"
-                "- If asked about timeline/SLA → respond ONLY with the timeline. Do NOT mention anything else.\n"
-                "- If asked about a single specific document → answer ONLY about that document. Do NOT list all documents.\n"
-                "Adding unrequested information is STRICTLY FORBIDDEN.\n"
-                "BREVITY: For single-aspect questions (timeline, fees, etc.), answer in 2-5 lines MAX. Do NOT dump full service overview.\n\n"
-                "You are a polite government services assistant for the Sewa Setu Chhattisgarh portal.\n"
-                "Answer using ONLY the provided context. Output ENTIRELY in English (Roman alphabet only).\n"
-                "Be warm and respectful. Use markdown formatting with bullet points.\n"
-                f"{service_rules_en}"
-                "DOCUMENT RULES: Determine mandatory/optional status ONLY from 'REQUIRED DOCUMENTS' list. "
-                "If a document is '(Mandatory: Yes)' with no alternatives, clearly state it cannot be bypassed.\n"
-                "FEE INTERPRETATION RULE: When the context mentions 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee', these are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. "
-                "The total application fee is the fee for ONE method, not both added together. "
-                "If the citizen asks about total cost and the required documents mention any monetary costs (like challans, stamp paper fees, notarization fees), mention those as additional costs on top of the application fee.\n\n"
-                f"--- RETRIEVED CONTEXT (ENGLISH) ---\n{context_en}\n--- END CONTEXT ---"
-            )
-        }
-    ]
-    # NO history appended — intermediate calls use only context + query
-    messages_en.append({
-        "role": "user",
-        "content": f"{english_query}\n\nIMPORTANT: Output your response ENTIRELY in English. Do NOT write in Devanagari script (Hindi characters) and do NOT use Hinglish. Every single word must be standard English using only Latin letters."
-    })
-
-    # Generate Intermediate Hindi Answer — NO HISTORY, only RAG context + query
-    messages_hi = [
-        {
-            "role": "system",
-            "content": (
-                "सख्त उत्तर-मात्र नियम (सर्वोच्च प्राथमिकता):\n"
-                "आपका पूरा उत्तर केवल पूछे गए प्रश्न का ही होना चाहिए। कोई भी अतिरिक्त जानकारी न जोड़ें।\n"
-                "- शुल्क पूछा गया → केवल शुल्क बताएं। दस्तावेज, पात्रता, प्रक्रिया या समयसीमा न जोड़ें।\n"
-                "- पात्रता पूछी गई → केवल पात्रता बताएं। दस्तावेज, शुल्क, प्रक्रिया या समयसीमा न जोड़ें।\n"
-                "- दस्तावेज पूछे गए → केवल दस्तावेज बताएं। पात्रता, शुल्क, प्रक्रिया या समयसीमा न जोड़ें।\n"
-                "- एक विशिष्ट दस्तावेज पूछा गया → केवल उसी दस्तावेज के बारे में बताएं। पूरी सूची न दें।\n"
-                "अनावश्यक जानकारी जोड़ना सख्त वर्जित है।\n"
-                "संक्षिप्तता: एकल-पहलू प्रश्नों (समयसीमा, शुल्क, आदि) के लिए 2-5 पंक्तियों में उत्तर दें। पूरी सेवा जानकारी न दें।\n\n"
-                "आप सेवा सेतु छत्तीसगढ़ पोर्टल के सहायक हैं।\n"
-                "केवल संदर्भ की जानकारी से उत्तर दें। देवनागरी लिपि में उत्तर दें।\n"
-                "विनम्र रहें। मार्कडाउन और बुलेट पॉइंट का उपयोग करें।\n"
-                f"{service_rules_hi}"
-                "दस्तावेज नियम: अनिवार्यता केवल 'आवश्यक दस्तावेज' सूची से निर्धारित करें।\n"
-                "शुल्क व्याख्या नियम: जब संदर्भ में 'ऑनलाइन शुल्क/पोर्टल शुल्क' और 'कियोस्क शुल्क/केंद्र शुल्क' दोनों हों, तो ये वैकल्पिक भुगतान विधियां हैं (ऑनलाइन या कियोस्क पर), संचयी नहीं। "
-                "कुल आवेदन शुल्क एक विधि का शुल्क है, दोनों का जोड़ नहीं। "
-                "यदि नागरिक कुल लागत पूछे और आवश्यक दस्तावेजों में कोई मौद्रिक लागत (जैसे चालान, स्टांप पेपर, नोटरी शुल्क) हो, तो उन्हें अतिरिक्त लागत के रूप में बताएं।\n\n"
-                f"--- RETRIEVED CONTEXT (HINDI) ---\n{context_hi}\n--- END CONTEXT ---"
-            )
-        }
-    ]
-    # NO history appended — intermediate calls use only context + query
-    messages_hi.append({
-        "role": "user",
-        "content": f"{hindi_query}\n\nIMPORTANT: Output your response ENTIRELY in Hindi using Devanagari script (देवनागरी लिपि). Do NOT write in English or use Roman alphabet/Latin characters. Every single word must be Devanagari."
-    })
-
-    # Generate answers concurrently
-    ans_en_task = asyncio.to_thread(generate_answer, messages_en)
-    ans_hi_task = asyncio.to_thread(generate_answer, messages_hi)
-    english_answer, hindi_answer = await asyncio.gather(ans_en_task, ans_hi_task)
-
-    return query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg
-
-async def synthesize_consensus_response(
+async def synthesize_final_response(
     query: str,
     query_lang: str,
     english_query: str,
     hindi_query: str,
     context_en: str,
     context_hi: str,
-    english_answer: str,
-    hindi_answer: str,
     fallback_msg: str,
     request: ChatRequest,
     service_id: Optional[int],
     condensed_history: Optional[list] = None
 ):
     """
-    Synthesizes consensus response and post-processes URLs (async).
-    Uses condensed history (last 2 turns only) instead of full raw history.
+    Synthesizes final response in the user's language using dual context in a single LLM call.
     """
-
-    # Consensus Synthesis to generate final response in the target language
+    # Dynamic target language matching
     if query_lang == "en":
         lang_label = "English"
         lang_instruction = (
@@ -678,22 +585,6 @@ async def synthesize_consensus_response(
             "Do NOT write in Devanagari script (Hindi characters) and do NOT use Hinglish words. "
             "Every single word must be standard English."
         )
-        if english_answer and re.search(r'[\u0900-\u097f]', english_answer) and english_answer.strip() not in ["जानकारी उपलब्ध नहीं है।", "Information not available."]:
-            try:
-                english_answer = await asyncio.to_thread(translate_query_to_english, english_answer)
-            except:
-                pass
-
-        if hindi_answer and hindi_answer.strip() not in ["जानकारी उपलब्ध नहीं है।", "Information not available."]:
-            try:
-                translated_hindi_answer = await asyncio.to_thread(translate_query_to_english, hindi_answer)
-            except:
-                translated_hindi_answer = "Information not available."
-        else:
-            translated_hindi_answer = "Information not available."
-
-        rag_context = f"Reference Context Details:\n- {english_answer}\n- {translated_hindi_answer}"
-
     elif query_lang == "hi":
         lang_label = "Hindi"
         lang_instruction = (
@@ -702,23 +593,7 @@ async def synthesize_consensus_response(
             "- Every single word must be written in Devanagari.\n"
             "- If the reference context contains English terms (such as 'affidavit', 'SC/ST certificate', 'mandatory', 'optional'), you MUST translate them to Hindi Devanagari (e.g. 'शपथ पत्र', 'एससी/एसटी प्रमाणपत्र', 'अनिवार्य', 'वैकल्पिक') in your final output. Do NOT leave English words in the Roman alphabet."
         )
-        if hindi_answer and not re.search(r'[\u0900-\u097f]', hindi_answer) and hindi_answer.strip() not in ["Information not available.", "जानकारी उपलब्ध नहीं है।"]:
-            try:
-                hindi_answer = await asyncio.to_thread(translate_query_to_hindi, hindi_answer)
-            except:
-                pass
-
-        if english_answer and english_answer.strip() not in ["Information not available.", "जानकारी उपलब्ध नहीं है।"]:
-            try:
-                translated_english_answer = await asyncio.to_thread(translate_query_to_hindi, english_answer)
-            except:
-                translated_english_answer = "जानकारी उपलब्ध नहीं है।"
-        else:
-            translated_english_answer = "जानकारी उपलब्ध नहीं है।"
-
-        rag_context = f"Reference Context Details:\n- {translated_english_answer}\n- {hindi_answer}"
-
-    else:  # hinglish
+    else:  # Hinglish
         lang_label = "Hinglish"
         lang_instruction = (
             "You MUST respond ENTIRELY in Hinglish — that is, Hindi language written ONLY in Roman/Latin alphabet script. "
@@ -728,23 +603,8 @@ async def synthesize_consensus_response(
             "Do NOT write in pure formal English either — use natural conversational Hinglish as spoken in India. "
             "If you accidentally write even one Devanagari character, your response will be rejected."
         )
-        if english_answer and re.search(r'[\u0900-\u097f]', english_answer) and english_answer.strip() not in ["जानकारी उपलब्ध नहीं है।", "Information not available."]:
-            try:
-                english_answer = await asyncio.to_thread(translate_query_to_english, english_answer)
-            except:
-                pass
 
-        if hindi_answer and hindi_answer.strip() not in ["जानकारी उपलब्ध नहीं है।", "Information not available."]:
-            try:
-                translated_hindi_answer = await asyncio.to_thread(translate_query_to_english, hindi_answer)
-            except:
-                translated_hindi_answer = "Information not available."
-        else:
-            translated_hindi_answer = "Information not available."
-
-        rag_context = f"Reference Context Details:\n- {english_answer}\n- {translated_hindi_answer}"
-
-    # Build dynamic service-specific rules for final synthesis
+    # Dynamic service-specific rules
     service_rules_final = ""
     if service_id is not None:
         if int(service_id) == 7:
@@ -762,6 +622,20 @@ async def synthesize_consensus_response(
             service_rules_final = (
                 "- MARRIAGE JURISDICTION RULE: Under the Chhattisgarh Compulsory Registration of Marriages Rules, a marriage MUST be registered in the local area where the marriage was solemnized or performed, NOT at the couple's hometown or place of residence. The registrar is the Local Authority of that local area (Gram Panchayat if rural; Municipality or Municipal Corporation if urban). State this clearly when citizens ask where or under which office/authority to register their marriage.\n"
             )
+        elif int(service_id) == 5:
+            service_rules_final = (
+                "- OBC RESIDENCY/DOMICILE RULE: If the citizen asks about Domicile or Residence rules/requirements for the OBC Certificate, explain clearly based on the context:\n"
+                "  1. A Domicile Certificate (मूल निवासी प्रमाण पत्र) is NOT mandatory (it is listed as one of several optional supporting documents under 'Residential Proof').\n"
+                "  2. To satisfy the residency requirement for the OBC Certificate, the applicant or their ancestors must have been residing in the geographical limits of Chhattisgarh since or before the OBC notification date, which is December 26, 1984 (२६ दिसम्बर १९८४).\n"
+                "  3. List the alternative supporting documents for Residential Proof (such as Land/House documents, Ration Card, Electricity Bill, Ward Member/MLA/MP certificate, Birth Certificate).\n"
+            )
+        elif int(service_id) == 201:
+            service_rules_final = (
+                "- EXCEPTIONS FOR ISSUED CERTIFICATE CORRECTIONS: If the user query is about correcting a name or spelling mistake on an ALREADY ISSUED certificate or document (such as a Domicile Certificate, Caste Certificate, or Marriage Certificate):\n"
+                "  1. Do NOT output 'Information not available.'\n"
+                "  2. Explain that the official and only method to correct a spelling mistake or change a name on an already issued certificate in Chhattisgarh is by applying for an Ordinary Gazette Notification for Name Change.\n"
+                "  3. Detail the required steps and documents (SBI challan of Rs 430, notarized affidavit of Rs 50, newspaper advertisement, deed form with 2 witnesses) from the Gazette context, stating that this process is required to correct the name on the requested certificate.\n"
+            )
 
     system_instruction = f"""STRICT ANSWER-ONLY RULE (HIGHEST PRIORITY — READ THIS FIRST):
 Your ENTIRE response must address ONLY the specific question the citizen asked. Adding ANY unrequested information is STRICTLY FORBIDDEN.
@@ -775,7 +649,6 @@ Your ENTIRE response must address ONLY the specific question the citizen asked. 
 BREVITY RULE: A short, precise, focused answer is ALWAYS better than a long one.
 - For single-aspect questions (like "how many days?" or "what is the fee?"), your answer should be 2-5 lines MAX.
 - NEVER dump the full service overview when only one aspect is asked.
-- VIOLATION EXAMPLE: If asked "kitne din lagenge?" (how many days?), responding with documents list + fees + timeline + registration process is WRONG. Only the timeline number is correct.
 
 You are SewaSetu AI Assistant — a polite government services assistant for the Chhattisgarh Sewa Setu portal.
 - LANGUAGE AND SCRIPT RULES: {lang_instruction}
@@ -783,18 +656,24 @@ You are SewaSetu AI Assistant — a polite government services assistant for the
 {service_rules_final}
 - MANDATORY DOCUMENTS: If a citizen asks about bypassing a mandatory document, clearly state 'No, you cannot apply without this document' and guide them on how to obtain it.
 - FEE INTERPRETATION: 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee' are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. Total application fee = fee for ONE method. If the citizen asks about total cost and the required documents mention monetary costs (challans, stamp paper, notarization), mention those as additional costs.
-- RAG CONTEXT is the ONLY source of truth. Ignore any contradictions in conversation history.
+- STRICT GROUNDING RULE (NO EXTRAPOLATION): You must ONLY answer using the facts directly stated in the ENGLISH SOURCE DOCUMENTS or HINDI SOURCE DOCUMENTS. Do NOT assume, extrapolate, or use external knowledge. If the provided source documents do not contain enough information to answer the user's specific query, you MUST reply EXACTLY with: \"I do not have sufficient information in my records to answer this question. Kripya Sewa Setu portal par check karein.\" (or its equivalent translation based on the query language: \"मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।\" for Hindi, and \"Mere paas is question ka answer dene ke liye records mein पर्याप्त information nahi hai. Kripya Sewa Setu portal par check karein.\" for Hinglish).
+- NO PLACEHOLDERS OR BLANK FORM TEMPLATES: If you find yourself writing template placeholders like '[जिला का नाम]', '[तहसील का नाम]', '[आवेदक का नाम]', 'वर्ष २०', 'दिनांक', 'क्रमांक', or generic blank template fields, it means the source documents DO NOT contain the actual address or answer. You are STRICTLY FORBIDDEN from outputting these placeholders. In all such cases, you MUST return the exact fallback message instead.
+- Ignore any contradictions in conversation history.
 
 FORMATTING: Use markdown with bold text and bullet points. Keep it clean and scannable.
 
-CRITICAL: Never mention 'RAG', 'First Answer', 'Second Answer', 'Reference Context Details', or the synthesis process.
+CRITICAL: Never mention 'RAG', 'English Source', 'Hindi Source', 'context', or the synthesis process.
 
-RAG CONTEXT:
-{rag_context}
+--- ENGLISH SOURCE DOCUMENTS ---
+{context_en}
+--- END ENGLISH SOURCE DOCUMENTS ---
+
+--- HINDI SOURCE DOCUMENTS ---
+{context_hi}
+--- END HINDI SOURCE DOCUMENTS ---
 """
 
     messages_final = [{"role": "system", "content": system_instruction}]
-    # Use CONDENSED history only (last 2 turns), not full raw history
     if condensed_history:
         for msg in condensed_history:
             messages_final.append({"role": msg["role"], "content": msg["content"]})
@@ -806,16 +685,24 @@ RAG CONTEXT:
     if query_lang == "hinglish" and re.search(r'[\u0900-\u097f]', final_reply):
         print("[Synthesis] WARNING: Hinglish response contains Devanagari characters. Re-converting to Roman script...")
         try:
-            romanize_prompt = (
-                "Convert the following text to Hinglish — Hindi written ONLY in Roman/Latin script. "
-                "Replace ALL Devanagari characters with their Roman transliteration. "
-                "Keep English words as-is. Keep the meaning and structure exactly the same. "
-                "Do NOT add any extra text, do NOT translate to formal English, just transliterate Devanagari to Roman script.\n\n"
-                f"Text to convert:\n{final_reply}\n\nRoman script output:"
-            )
-            romanized = await asyncio.to_thread(
-                generate_answer, [{"role": "user", "content": romanize_prompt}]
-            )
+            romanize_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict Devanagari-to-Roman script transliterator (converting Hindi to Hinglish).\n"
+                        "ABSOLUTELY NO Devanagari characters (क, ख, ग, है, हैं, क्या, etc.) are allowed in your output. "
+                        "Do NOT write any introduction, greetings, explanations, or conversational filler. "
+                        "Translate/transliterate ALL Devanagari Hindi characters to Roman script/Hinglish (e.g. 'नहीं' to 'Nahi', 'अनिवार्य' to 'Anivarya'). "
+                        "Keep all English words in the text exactly as-is. "
+                        "Do NOT translate Hindi to English; only transliterate it phonetically to Hinglish (Roman alphabet)."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Text to convert:\n{final_reply}\n\nRoman script output:"
+                }
+            ]
+            romanized = await asyncio.to_thread(generate_answer, romanize_messages)
             if romanized and not re.search(r'[\u0900-\u097f]', romanized):
                 final_reply = romanized
                 print("[Synthesis] Successfully romanized Hinglish response.")
@@ -839,6 +726,9 @@ RAG CONTEXT:
             lang_str = "hi" if query_lang == "hi" else "en"
             details_link = f"https://sewasetu.cgstate.gov.in/instractionPageNew.do?serviceId={service_id}&lang={lang_str}"
             
+    if is_info_not_available(final_reply):
+        final_reply = fallback_msg
+
     if details_link and final_reply != fallback_msg and details_link not in final_reply:
         if query_lang == "en":
             final_reply += f"\n\nFor more details and online application, please visit:\n[Apply on Sewa Setu Portal]({details_link})"
@@ -855,11 +745,13 @@ RAG CONTEXT:
             "hindi_query": hindi_query,
             "context_en": context_en,
             "context_hi": context_hi,
-            "english_answer": english_answer,
-            "hindi_answer": hindi_answer,
+            "english_answer": "N/A",
+            "hindi_answer": "N/A",
             "service_id": service_id
         }
     return {"response": final_reply, "service_id": service_id}
+
+
 
 
 async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optional[int]):
@@ -869,24 +761,148 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     query = normalize_query_terms(query)
     query_lang, english_query, hindi_query = await process_query_languages(query)
 
+    # === INTENT CLASSIFICATION + QUERY RESOLUTION (MOVED TO TOP) ===
+    raw_history = request.conversation_history or []
+    if not raw_history and request.messages:
+        raw_history = request.messages[:-1]
+    sanitized = sanitize_history(raw_history)
+
+    # Filter out greeting exchanges from history (they're not service context)
+    greeting_words = {"hi", "hello", "hey", "hii", "hiii", "namaste", "namaskar", "bye", "thanks", "thank you", "ok", "okay", "haan", "theek hai"}
+    filtered_sanitized = []
+    skip_next = False
+    for msg in sanitized:
+        if skip_next:
+            skip_next = False
+            continue
+        if msg["role"] == "user" and msg["content"].strip().lower() in greeting_words:
+            # Skip this user greeting AND the next assistant response
+            skip_next = True
+            continue
+        filtered_sanitized.append(msg)
+    sanitized = filtered_sanitized
+
+    # Programmatic override for spelling/name corrections on active applications vs issued certificates
+    force_new_topic_201 = False
+    q_clean = query.lower()
+    
+    # Generic structural keywords (no specific out-of-scope services hardcoded)
+    status_terms = ["submitted", "pending", "draft", "lending", "in-progress", "fill", "filling", "bhara", "bharne", "जमा", "भरने", "भरते"]
+    form_terms = ["application", "form", "आवेदन", "फॉर्म"]
+    mistake_terms = ["mistake", "error", "typo", "spelling", "speling", "mistak", "mistek", "spelling mistake", "spelling error", "गलती", "त्रुटि", "वर्तनी"]
+    correction_terms = ["correct", "correction", "change", "update", "modify", "amend", "sujhaar", "sudhaar", "सुधार", "संशोधन", "बदल"]
+
+    has_status = any(word in q_clean for word in status_terms)
+    has_form = any(word in q_clean for word in form_terms)
+    has_mistake = any(word in q_clean for word in mistake_terms)
+    has_correction = any(word in q_clean for word in correction_terms)
+
+    # Typo correction on an active/draft/submitted application form:
+    is_active_form_typo = (has_mistake and (has_form or has_status)) or (has_correction and has_status and has_form)
+
+    if is_active_form_typo:
+        print("[RAG Pipeline] Programmatic intercept: active application typo correction. Returning fallback.")
+        if query_lang == "en":
+            fallback_msg = "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal."
+        elif query_lang == "hi":
+            fallback_msg = "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।"
+        else:
+            fallback_msg = "Main aapke prashn ka uttar dene ke liye paryapt jankari nahi rakhta. Kripya Sewa Setu portal par jaanch karein."
+        
+        if request.detailed:
+            return {
+                "response": fallback_msg,
+                "query_lang": query_lang,
+                "english_query": english_query,
+                "hindi_query": hindi_query,
+                "context_en": "",
+                "context_hi": "",
+                "english_answer": "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal.",
+                "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
+                "service_id": service_id
+            }
+        return {"response": fallback_msg}
+    
+    # Name correction on ALREADY ISSUED certificates:
+    # Exclude joint-application or comparison queries structurally (words like "together", "vs")
+    elif has_correction and not is_active_form_typo:
+        has_cert = any(word in q_clean for word in ["certificate", "praman", "प्रमाण", "caste", "domicile", "marriage", "obc", "sc", "st", "jati", "shadi", "विवाह", "शादी", "मूल", "निवास"])
+        is_name_query = any(word in q_clean for word in ["name", "naam", "नाम", "spelling", "वर्तनी", "spell"])
+        is_joint_or_comparison = any(word in q_clean for word in ["together", "dono", "ek sath", "ek-sath", "vs", "difference", "comparison", "अंतर", "तुलना", "तुलना करें", "बनाम", "समान", "समानता", "बराबर"])
+        
+        if has_cert and is_name_query and not is_joint_or_comparison:
+            print("[RAG Pipeline] Programmatic override: routing issued certificate correction to Gazette (Service ID 201)")
+            service_id = 201
+            force_new_topic_201 = True
+
+    # Classify query intent FIRST — needs full history to understand follow-ups
+    intent_result = await asyncio.to_thread(
+        classify_query_intent, query, sanitized
+    )
+    intent = intent_result["intent"]
+    resolved_query = intent_result["resolved_query"]
+    topic_summary = intent_result["topic_summary"]
+    
+    if force_new_topic_201:
+        print("[RAG Pipeline] Forcing new_topic for Gazette correction override.")
+        intent = "new_topic"
+        resolved_query = query
+    
+    print(f"[RAG Pipeline] Intent: {intent}, Resolved query: '{resolved_query}', Topic: '{topic_summary}'")
+
+    if intent == "new_topic" and not force_new_topic_201:
+        try:
+            classification = await asyncio.to_thread(classify_service, query, services_list, False)
+            if classification:
+                if classification.get("service_id"):
+                    new_service_id = int(classification["service_id"])
+                    print(f"[RAG Pipeline] Dynamic LLM classification mapped query to service_id: {new_service_id}")
+                    service_id = new_service_id
+                else:
+                    # Generic / Comparison / Out-of-Scope queries mapped to None (no sidebar pinning, search entire DB)
+                    print(f"[RAG Pipeline] Dynamic LLM classification mapped query to None")
+                    service_id = None
+        except Exception as e:
+            print(f"[RAG Pipeline] Dynamic LLM classification failed: {e}")
+
+    # === INTERCEPT non-RAG intents (greeting, farewell, thanks, identity, out_of_scope) ===
+    intent_response = get_intent_response(intent, query)
+    if intent_response:
+        print(f"[RAG Pipeline] Intent '{intent}' intercepted -> returning canned response")
+        if request.detailed:
+            intent_response.update({
+                "query_lang": "N/A",
+                "english_query": "N/A",
+                "hindi_query": "N/A",
+                "context_en": "",
+                "context_hi": "",
+                "english_answer": "N/A",
+                "hindi_answer": "N/A",
+                "service_id": "N/A",
+                "intent": intent
+            })
+        return intent_response
+
     service_name = "Chhattisgarh Citizen Service"
+    service_name_hi = "छत्तीसगढ़ नागरिक सेवा"
     if service_id:
         for s in services_list:
             if str(s["service_id"]) == str(service_id):
                 service_name = s["name_en"]
+                service_name_hi = s["name_hi"]
                 break
 
     # 1. Deterministic choice prompt for eligibility or document queries
     if request.interactive and service_id and not request.is_option_click and is_eligibility_or_document_query(query, english_query, hindi_query):
         if query_lang == "hi":
-            default_text = "क्या आप दस्तावेज़ चेकलिस्ट का उपयोग करके अपनी पात्रता जांचना चाहते हैं, या विस्तृत पात्रता मानदंडों की जानकारी देखना चाहते हैं, या सीधे अपने प्रश्न का उत्तर चाहते हैं?"
+            default_text = f"क्या आप {service_name_hi} दस्तावेज़ चेकलिस्ट का उपयोग करके अपनी पात्रता जांचना चाहते हैं, या विस्तृत पात्रता मानदंडों की जानकारी देखना चाहते हैं, या सीधे अपने प्रश्न का उत्तर चाहते हैं?"
             options = [
                 {
-                    "label": "📋 दस्तावेज़ चेकलिस्ट द्वारा पात्रता जांचें",
+                    "label": f"📋 {service_name_hi} चेकलिस्ट द्वारा पात्रता जांचें",
                     "query": f"Show required documents checklist for {service_name}"
                 },
                 {
-                    "label": "ℹ️ विस्तृत पात्रता मानदंड और नियम देखें",
+                    "label": f"ℹ️ {service_name_hi} के विस्तृत नियम देखें",
                     "query": f"Explain all criteria and eligibility rules for {service_name}"
                 },
                 {
@@ -895,14 +911,14 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 }
             ]
         elif query_lang == "hinglish":
-            default_text = "Kya aap document checklist se apni eligibility check karna chahte hain, ya detailed eligibility criteria rules dekhna chahte hain, ya directly apne sawal ka jawab chahte hain?"
+            default_text = f"Kya aap {service_name} ke document checklist se apni eligibility check karna chahte hain, ya detailed eligibility criteria rules dekhna chahte hain, ya directly apne sawal ka jawab chahte hain?"
             options = [
                 {
-                    "label": "📋 Check Eligibility via Document Checklist",
+                    "label": f"📋 Check Eligibility for {service_name} via Checklist",
                     "query": f"Show required documents checklist for {service_name}"
                 },
                 {
-                    "label": "ℹ️ Explain Detailed Eligibility & Criteria Rules",
+                    "label": f"ℹ️ Explain Detailed Eligibility & Rules for {service_name}",
                     "query": f"Explain all criteria and eligibility rules for {service_name}"
                 },
                 {
@@ -911,14 +927,14 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 }
             ]
         else:
-            default_text = "Would you like to check your eligibility using the interactive document checklist, view the detailed criteria rules, or get a direct answer to your question?"
+            default_text = f"Would you like to check your eligibility for the {service_name} using the interactive document checklist, view the detailed criteria rules, or get a direct answer to your question?"
             options = [
                 {
-                    "label": "📋 Check Eligibility via Document Checklist",
+                    "label": f"📋 Check Eligibility for {service_name} via Checklist",
                     "query": f"Show required documents checklist for {service_name}"
                 },
                 {
-                    "label": "ℹ️ Explain Detailed Eligibility & Criteria Rules",
+                    "label": f"ℹ️ Explain Detailed Eligibility & Rules for {service_name}",
                     "query": f"Explain all criteria and eligibility rules for {service_name}"
                 },
                 {
@@ -960,64 +976,16 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 "service_id": service_id
             }
 
-    # 3. Standard RAG execution
-    # === INTENT CLASSIFICATION + QUERY RESOLUTION ===
-    # Sanitize history: remove null/empty/special-type messages
-    raw_history = request.conversation_history or []
-    if not raw_history and request.messages:
-        raw_history = request.messages[:-1]
-    sanitized = sanitize_history(raw_history)
-
-    # Filter out greeting exchanges from history (they're not service context)
-    greeting_words = {"hi", "hello", "hey", "hii", "hiii", "namaste", "namaskar", "bye", "thanks", "thank you", "ok", "okay", "haan", "theek hai"}
-    filtered_sanitized = []
-    skip_next = False
-    for i, msg in enumerate(sanitized):
-        if skip_next:
-            skip_next = False
-            continue
-        if msg["role"] == "user" and msg["content"].strip().lower() in greeting_words:
-            # Skip this user greeting AND the next assistant response
-            skip_next = True
-            continue
-        filtered_sanitized.append(msg)
-    sanitized = filtered_sanitized
-
-    # Classify query intent FIRST — needs full history to understand follow-ups
-    # e.g., "kitne din lagenge banne me?" needs to see marriage context in history
-    intent_result = await asyncio.to_thread(
-        classify_query_intent, query, sanitized
-    )
-    intent = intent_result["intent"]
-    resolved_query = intent_result["resolved_query"]
-    topic_summary = intent_result["topic_summary"]
-    
-    print(f"[RAG Pipeline] Intent: {intent}, Resolved query: '{resolved_query}', Topic: '{topic_summary}'")
-
-    if intent == "new_topic":
-        try:
-            classification = await asyncio.to_thread(classify_service, resolved_query, services_list, True)
-            if classification and classification.get("service_id"):
-                new_service_id = int(classification["service_id"])
-                print(f"[RAG Pipeline] Dynamic LLM classification mapped query to service_id: {new_service_id}")
-                service_id = new_service_id
-        except Exception as e:
-            print(f"[RAG Pipeline] Dynamic LLM classification failed: {e}")
-
-    # === INTERCEPT non-RAG intents (greeting, farewell, thanks, identity, out_of_scope) ===
-    intent_response = get_intent_response(intent, query)
-    if intent_response:
-        print(f"[RAG Pipeline] Intent '{intent}' intercepted -> returning canned response")
-        return intent_response
-
     # Always use resolved_query for RAG retrieval — the classifier now produces
     # a self-contained query for BOTH intents (with aspect carry-over for new_topic)
     rag_query = resolved_query
     is_follow_up = (intent == "follow_up")
+    
+    # If the user is starting a new topic, use the original query instead of the rewritten query to prevent hallucination switches
+    if intent == "new_topic":
+        rag_query = query
 
     # Check if target service has switched compared to history
-    # Extract service ID from last assistant message's link
-    # This affects ONLY synthesis history, NOT the classifier (which already ran)
     last_service_id = None
     for msg in reversed(sanitized):
         if msg["role"] == "assistant":
@@ -1027,49 +995,41 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 break
     
     if last_service_id and service_id and last_service_id != service_id:
-        # Check if the query itself explicitly contains keywords of the current service_id
         if is_follow_up and query_contains_service_keywords(query, resolved_query, service_id):
             print(f"[RAG Pipeline] SAFETY: Query contains keywords of the new service ({service_id}) which differs from history ({last_service_id}). Forcing new_topic.")
             is_follow_up = False
             intent = "new_topic"
-
+            rag_query = query
+        
         if is_follow_up:
-            # Classifier says follow_up — user is continuing the conversation topic,
-            # not the sidebar selection. Trust the classifier: use conversation's service_id.
             print(f"[RAG Pipeline] Follow-up detected but sidebar service ({service_id}) differs from conversation service ({last_service_id}). Trusting classifier → using service_id={last_service_id}")
             service_id = last_service_id
         else:
-            # New topic with a different sidebar service — clear history for synthesis
             print(f"[RAG Pipeline] Service switch detected (history={last_service_id}, sidebar={service_id}). Clearing history for synthesis.")
             sanitized = []
             is_follow_up = False
 
     # SAFETY CHECK: Detect misclassified topic switches
-    # If the classifier says follow_up but the topic_summary mentions "different service",
-    # force-clear history to prevent cross-service contamination
     if is_follow_up and topic_summary:
         topic_lower = topic_summary.lower()
         if any(phrase in topic_lower for phrase in ["different service", "new service", "another service", "different topic"]):
             print(f"[RAG Pipeline] SAFETY: Classifier said follow_up but topic indicates topic switch. Forcing new_topic.")
             is_follow_up = False
             intent = "new_topic"
+            rag_query = query
 
     # Build condensed history for final synthesis only
     condensed = build_condensed_history(sanitized, is_follow_up, topic_summary)
 
-    # If resolved query differs from original, re-translate for better RAG retrieval
-    # e.g., original "and what about marriage?" → resolved "What are the fees for marriage registration?"
-    # Without re-translation, RAG would search for vague "what about marriage?" and get ALL chunks
     if rag_query.lower().strip() != query.lower().strip():
         print(f"[RAG Pipeline] Re-translating resolved query for RAG: '{rag_query}'")
-        # Preserve original user language — resolved query is often English but user may be Hinglish/Hindi
         original_query_lang = query_lang
         _, english_query, hindi_query = await process_query_languages(rag_query)
-        query_lang = original_query_lang  # Keep user's language for synthesis response
+        query_lang = original_query_lang
         print(f"[RAG Pipeline] Preserved original query_lang: '{query_lang}'")
 
     # Use the resolved query + re-translated languages for RAG retrieval
-    query_lang, english_query, hindi_query, context_en, context_hi, english_answer, hindi_answer, fallback_msg = await run_rag_pipeline_intermediates(
+    query_lang, english_query, hindi_query, context_en, context_hi, fallback_msg = await run_rag_pipeline_intermediates(
         rag_query, request, service_id, query_lang, english_query, hindi_query
     )
     
@@ -1082,19 +1042,42 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 "hindi_query": hindi_query,
                 "context_en": "",
                 "context_hi": "",
-                "english_answer": english_answer,
-                "hindi_answer": hindi_answer,
-                "service_id": service_id
+                "english_answer": "Information not available.",
+                "hindi_answer": "जानकारी उपलब्ध नहीं है।",
+                "service_id": service_id,
+                "intent": intent
             }
         return {"response": fallback_msg}
-            
 
-
-    return await synthesize_consensus_response(
+    # Call single final synthesis response
+    res = await synthesize_final_response(
         rag_query, query_lang, english_query, hindi_query,
-        context_en, context_hi, english_answer, hindi_answer, fallback_msg,
+        context_en, context_hi, fallback_msg,
         request, service_id, condensed_history=condensed
     )
+
+    # Apply the safeguard fallback override on the final synthesized response
+    final_text = res["response"] if isinstance(res, dict) else res
+    if is_info_not_available(final_text):
+        print("[RAG Safe-Guard] Programmatic bypass: Returning language-specific fallback message directly.")
+        if request.detailed:
+            return {
+                "response": fallback_msg,
+                "query_lang": query_lang,
+                "english_query": english_query,
+                "hindi_query": hindi_query,
+                "context_en": context_en,
+                "context_hi": context_hi,
+                "english_answer": "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal.",
+                "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
+                "service_id": service_id,
+                "intent": intent
+            }
+        return {"response": fallback_msg}
+
+    if request.detailed and isinstance(res, dict):
+        res["intent"] = intent
+    return res
 
 
 @app.post("/api/chat")
@@ -1110,38 +1093,49 @@ async def chat_with_bot(request: ChatRequest):
         print(f"Error printing payload: {e}")
     print("=" * 80 + "\n")
 
-    # 1. Resolve query
-    query = request.query
-    if not query and request.messages:
-        query = request.messages[-1].content
+    token = llm_trace.set([])
+    try:
+        # 1. Resolve query
+        query = request.query
+        if not query and request.messages:
+            query = request.messages[-1].content
 
-    if not query:
-        raise HTTPException(status_code=400, detail="Query text is required.")
+        if not query:
+            raise HTTPException(status_code=400, detail="Query text is required.")
 
-    query = normalize_query_terms(query)
+        query = normalize_query_terms(query)
 
-    # 2. Resolve service_id / sno
-    service_id = None
-    sno = request.selected_sno or request.service_id
-    if sno:
-        sno_str = str(sno)
-        if sno_str in sno_to_sid:
-            service_id = sno_to_sid[sno_str]
-        elif sno_str in ["3", "4", "5", "7", "201"]:
-            service_id = int(sno_str)
+        # 2. Resolve service_id / sno
+        service_id = None
+        sno = request.selected_sno or request.service_id
+        if sno:
+            sno_str = str(sno)
+            if sno_str in sno_to_sid:
+                service_id = sno_to_sid[sno_str]
+            elif sno_str in ["3", "4", "5", "7", "201"]:
+                service_id = int(sno_str)
 
-    # Auto-classify query to specific service if not explicitly selected
-    if not service_id:
-        try:
-            classification = classify_service(query, services_list)
-            if classification and classification.get("service_id"):
-                service_id = int(classification["service_id"])
-                print(f"[API Chat] Auto-classified query '{query}' to service_id: {service_id}")
-        except Exception as e:
-            print(f"[API Chat] Failed to auto-classify service: {e}")
+        # Auto-classify query to specific service if not explicitly selected
+        if not service_id:
+            try:
+                classification = classify_service(query, services_list)
+                if classification:
+                    if classification.get("service_id"):
+                        service_id = int(classification["service_id"])
+                        print(f"[API Chat] Auto-classified query '{query}' to service_id: {service_id}")
+                    else:
+                        print(f"[API Chat] Auto-classified query mapped to None")
+                        service_id = None
+            except Exception as e:
+                print(f"[API Chat] Failed to auto-classify service: {e}")
 
-    # Execute standard RAG pipeline directly (location flows removed)
-    return await run_rag_pipeline(query, request, service_id)
+        # Execute standard RAG pipeline directly (location flows removed)
+        res = await run_rag_pipeline(query, request, service_id)
+        if isinstance(res, dict):
+            res["llm_calls_trace"] = llm_trace.get()
+        return res
+    finally:
+        llm_trace.reset(token)
 
 
 @app.post("/api/search")

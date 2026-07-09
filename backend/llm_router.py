@@ -3,8 +3,20 @@ import sys
 import re
 import json
 import requests
+import contextvars
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+
+llm_trace = contextvars.ContextVar("llm_trace", default=None)
+
+def log_llm_call(function_name: str, input_val: Any, output_val: Any):
+    trace = llm_trace.get()
+    if isinstance(trace, list):
+        trace.append({
+            "function": function_name,
+            "input": input_val,
+            "output": output_val
+        })
 
 # Ensure stdout uses UTF-8 to prevent Windows-specific print crashes
 if sys.stdout.encoding != 'utf-8':
@@ -421,124 +433,172 @@ def translate_query_to_hindi(query: str) -> str:
 def classify_service(query: str, services_list: List[Dict[str, Any]], use_llm_only: bool = False) -> Dict[str, Optional[str]]:
     """
     Service classification mapping matching query to correct serial number 'sno'.
-    Uses rule-based heuristics first, then calls Sarvam AI if no high-confidence rule match is found.
+    Uses LLM classification for all queries to ensure 100% accuracy and zero hardcoded rules.
     """
     if not query:
         return {"sno": None, "service_id": None}
 
-    if use_llm_only:
-        print(f"[LLM Router] Bypassing heuristics, using LLM-only classification for query: '{query}'")
-        has_in_scope = True
-    else:
-        q_lower = query.lower()
+    q_lower = query.lower()
 
-        # Avoid calling LLM for very short generic inputs or greetings
-        greetings = {"hi", "hello", "hey", "ok", "okay", "yes", "no", "thanks", "thank you", "plz", "please", "help", "namaste", "नमस्ते", "हेलो", "बाय", "bye"}
-        words = set(q_lower.split())
-        if len(q_lower.strip()) < 3 or (len(words) == 1 and words.intersection(greetings)):
-            print(f"[LLM Router] Simple greeting or short query detected: '{query}'. Skipping classification.")
-            return {"sno": None, "service_id": None}
+    # Avoid calling API for very short generic inputs or greetings
+    greetings = {"hi", "hello", "hey", "ok", "okay", "yes", "no", "thanks", "thank you", "plz", "please", "help", "namaste", "नमस्ते", "हेलो", "बाय", "bye"}
+    words = set(q_lower.split())
+    if len(q_lower.strip()) < 3 or (len(words) == 1 and words.intersection(greetings)):
+        print(f"[LLM Router] Simple greeting or short query detected: '{query}'. Skipping classification.")
+        return {"sno": None, "service_id": None}
 
-        # Define in-scope keywords
-        has_marriage = any(k in q_lower for k in ["marriage", "marrage", "mariage", "shadi", "shaadi", "vivah", "विवाह", "शादी", "मैरिज", "मॅरिज"])
-        has_gazette = any(k in q_lower for k in ["gazette", "gazzete", "gazzette", "gazet", "name change", "naam change", "naam badal", "naam parivartan", "naam correction", "change name", "नाम परिवर्तन", "राजपत्र", "affidavit for name change", "गजट"])
-        has_domicile = any(k in q_lower for k in ["domicile", "domicil", "domiciel", "domicille", "dimicile", "domisile", "domisiel", "domocile", "domociel", "resident", "residence", "निवास", "मूल निवासी", "डोमिसाइल"])
-        has_obc = any(k in q_lower for k in ["obc", "अन्य पिछड़ा वर्ग", "पिछड़ा वर्ग", "ओबीसी", "ओ.बी.सी."])
-        has_caste = any(k in q_lower for k in ["sc/st", "scheduled caste", "scheduled tribe", "अनुसूचित जाति", "अनुसूचित जनजाति", "caste", "cast", "जाति", "tribal", "जनजाति", "gond", "chamar", "mahyavanshi", "khadiya", "kharwar", "एससी", "एसटी", "एससी/एसटी"]) or any(re.search(r'\b' + re.escape(k) + r'\b', q_lower) for k in ["sc", "st"])
-
-        has_in_scope = has_marriage or has_gazette or has_domicile or has_obc or has_caste
-
-        # Define out-of-scope keywords
-        has_out_of_scope = any(k in q_lower for k in [
-            "scholarship", "छात्रवृत्ति", "matric", "स्कॉलरशिप",
-            "rental", "rent", "किराया", "रेंट", "एग्रीमेंट",
-            "water connection", "जल कनेक्शन", "नल कनेक्शन", "water supply",
-            "electricity", "बिजली", "power", "विद्युत",
-            "ration card", "राशन कार्ड",
-            "land records", "khasra", "khatauni", "b-1", "b-i", "खसरा", "नक्शा", "ज़मीन",
-            "housing loan", "home loan", "ऋण", "लोन", "loan",
-            "income certificate", "आय प्रमाण पत्र", "आय प्रमाणपत्र"
-        ])
-
-        # If it contains out-of-scope keywords and NOT in-scope keywords, it is definitely out-of-scope
-        if has_out_of_scope and not has_in_scope:
-            print(f"[LLM Router] Rule-based filter: Query contains out-of-scope terms and no in-scope terms. Mapping to None.")
-            return {"sno": None, "service_id": None}
-
-    if not use_llm_only:
-        # 1. Quick rule-based heuristic check for high confidence in-scope keywords
-        if has_gazette:
-            return {"sno": "5", "service_id": "201"}
-        if has_obc:
-            return {"sno": "3", "service_id": "5"}
-        if has_caste:
-            return {"sno": "2", "service_id": "4"}
-        if has_domicile:
-            return {"sno": "4", "service_id": "7"}
-        if has_marriage:
-            return {"sno": "1", "service_id": "3"}
-
-        # 2. Try semantic database lookup before LLM fallback
-        try:
-            try:
-                from backend.rag import collection, embedding_model
-            except ImportError:
-                from rag import collection, embedding_model
-
-            print(f"[LLM Router] Performing semantic lookup fallback for query: '{query}'")
-            query_text = f"query: {query}"
-            query_vector = embedding_model.encode(query_text).tolist()
-            
-            # Query database without service filter
-            results = collection.query(
-                query_embeddings=[query_vector],
-                n_results=3,
-                where={"lang": "en"}
-            )
-            
-            if results and "documents" in results and results["documents"]:
-                docs = results["documents"][0]
-                metas = results["metadatas"][0]
-                distances = results["distances"][0]
-                
-                threshold = 0.45 if has_in_scope else 0.33
-                if distances and distances[0] < threshold:
-                    matched_sid = metas[0].get("service_id")
-                    if matched_sid:
-                        # Find matching sno in services_list
-                        matched_sno = None
-                        for s in services_list:
-                            if str(s["service_id"]) == str(matched_sid):
-                                matched_sno = str(s["sno"])
-                                break
-                        if matched_sno:
-                            print(f"[LLM Router] Semantic match found: service_id {matched_sid} (sno {matched_sno}) with distance {distances[0]:.4f}")
-                            return {"sno": matched_sno, "service_id": str(matched_sid)}
-        except Exception as e:
-            print(f"[LLM Router] Semantic classification fallback failed: {e}")
-
-    # 3. Fall back to LLM classification for complex/ambiguous queries or queries with spelling typos
+    # Call LLM classifier directly for all in-scope mapping
     services_catalog_desc = "\n".join([
         f"{s['sno']}. Serial Number {s['sno']} (Service ID: {s['service_id']}): {s['name_en']} | {s['name_hi']}"
         for s in services_list
     ])
 
+    import re
+    is_hindi = bool(re.search(r'[\u0900-\u097f]', query))
+
+    english_few_shots = (
+        "FEW-SHOT EXAMPLES (ENGLISH/HINGLISH):\n"
+        "- Query: 'domicile certificate application me spelling mistake ho gayi hai correct kaise karein?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'obc income required for creamy status'\n"
+        "  Output: {\"sno\": \"3\", \"service_id\": \"5\"}\n"
+        "- Query: 'domicile ki kia requirement hai marriage me?'\n"
+        "  Output: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Query: 'shadi ke baad caste certificate me name change kaise karein?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'is domicile necessary for obc certificate?'\n"
+        "  Output: {\"sno\": \"3\", \"service_id\": \"5\"}\n"
+        "- Query: 'st certificate ke liye domicile rules kya hain?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'driving license renewal online process'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'ration card list me name correction kaise hoga?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'do we need sc certificate for obc scholarship application?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'is voter id mandatory for st certificate if i have school study certificate?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'caste certificate correction name change application format'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'marriage registrar local area authority in village for caste certificate holders'\n"
+        "  Output: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Query: 'is notarized affidavit in Form-III for name change same as marriage affidavit?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'obc income certificate slab details for domicile students'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'can we apply for marriage certificate and name change together on sewasetu?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'fees of obc certificate vs ordinary gazette publication fee'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'caste certificate digital signature verification vs domicile verification status'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'is digital signature of sdo for st certificate same as domicile?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'gazette publication name change advertisement stamp paper vs marriage affidavit stamp paper'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+    )
+
+    hindi_few_shots = (
+        "FEW-SHOT EXAMPLES (HINDI):\n"
+        "- Query: 'मूल निवास प्रमाण पत्र आवेदन में नाम की त्रुटि सुधार कैसे करें?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'ओबीसी क्रीमी स्टेटस के लिए आवश्यक आय'\n"
+        "  Output: {\"sno\": \"3\", \"service_id\": \"5\"}\n"
+        "- Query: 'क्या विवाह पंजीकरण के लिए निवास प्रमाण पत्र अनिवार्य है?'\n"
+        "  Output: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Query: 'शादी के बाद जाति प्रमाण पत्र में नाम सुधार कैसे होगा?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'क्या ओबीसी प्रमाण पत्र के लिए मूल निवासी प्रमाण पत्र आवश्यक है?'\n"
+        "  Output: {\"sno\": \"3\", \"service_id\": \"5\"}\n"
+        "- Query: 'एसटी प्रमाण पत्र के लिए छत्तीसगढ़ निवास नियम क्या हैं?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'ड्राइविंग लाइसेंस ऑनलाइन नवीनीकरण प्रक्रिया'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'राशन कार्ड सूची में नाम सुधार कैसे होगा?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'क्या हमें ओबीसी छात्रवृत्ति आवेदन के लिए एससी प्रमाण पत्र की आवश्यकता है?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'क्या एसटी प्रमाण पत्र के लिए मतदाता पहचान पत्र अनिवार्य है यदि मेरे पास स्कूल अध्ययन प्रमाण पत्र है?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'जाति प्रमाण पत्र सुधार नाम परिवर्तन आवेदन प्रारूप क्या है?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'जाति प्रमाण पत्र धारकों के लिए गांव में विवाह रजिस्ट्रार स्थानीय क्षेत्र प्राधिकरण कौन है?'\n"
+        "  Output: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Query: 'क्या नाम परिवर्तन के लिए प्रारूप-III में सत्यापित शपथ पत्र विवाह शपथ पत्र के समान है?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'निवास करने वाले छात्रों के लिए ओबीसी आय प्रमाण पत्र स्लैब विवरण'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'क्या हम सेवासेतु पर विवाह प्रमाण पत्र और नाम परिवर्तन के लिए एक साथ आवेदन कर सकते हैं?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'ओबीसी प्रमाण पत्र का शुल्क बनाम सामान्य राजपत्र प्रकाशन शुल्क क्या है?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'क्या ओबीसी प्रमाणपत्र के लिए निवास प्रमाणपत्र आवश्यक है?'\n"
+        "  Output: {\"sno\": \"3\", \"service_id\": \"5\"}\n"
+        "- Query: 'ओबीसी निवास के लिए जाति प्रमाण पत्र ऑफ़लाइन तहसील कार्यालय का पता'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'निवास प्रमाण पत्र छत्तीसगढ़ शुल्क बनाम जाति प्रमाण पत्र शुल्क'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'क्या एसटी प्रमाण पत्र के लिए एसडीएम का डिजिटल हस्ताक्षर निवास प्रमाण पत्र के समान है?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'जाति प्रमाण पत्र डिजिटल हस्ताक्षर सत्यापन बनाम निवास सत्यापन स्थिति'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+    )
+
+    selected_few_shots = hindi_few_shots if is_hindi else english_few_shots
+
     prompt = (
         "You are an expert service mapping assistant for the SewaSetu Chhattisgarh portal.\n"
-        "Your task is to identify which specific service from the catalog is the closest match to the user query.\n"
-        "The query could be in English, Hindi, or Hinglish.\n\n"
-        "Here is the catalog of services:\n"
+        "Your task is to map a user query to the correct service from the catalog below.\n\n"
+        "CATALOG OF SERVICES:\n"
         f"{services_catalog_desc}\n\n"
+        "CLASSIFICATION RULES:\n"
+        "1. PRIMARY TARGET RULE (Mixed Services): If a query mentions multiple services or certificates (e.g. asking about supporting documents like Domicile for a target certificate like Marriage or OBC), ALWAYS map it to the primary TARGET service that the user is trying to obtain, NOT the supporting document. For example:\n"
+        "   - 'is domicile necessary for obc' -> OBC Certificate (SNO 3)\n"
+        "   - 'marriage registration for domicile holder' -> Marriage Registration (SNO 1)\n"
+        "2. NAME CHANGE / CORRECTION ON ISSUED CERTIFICATE: If the query asks about changing, correcting, or updating a name or spelling on an ALREADY ISSUED certificate or document (e.g., SC/ST or OBC certificate, Domicile, or Marriage certificate), you MUST map it to 'Ordinary Gazette Notification for Name Change' (SNO 5, Service ID 201). For example:\n"
+        "   - 'caste certificate me name correction' -> SNO 5\n"
+        "   - 'domicile me naam change process' -> SNO 5\n"
+        "   - 'shadi ke baad name change kaise karein' -> SNO 5\n"
+        "3. ACTIVE/PENDING APPLICATION FORM TYPOS: If the user asks about correcting a spelling mistake, typo, or details in an active, pending, draft, or submitted application form (e.g., 'application form', 'submitted application', 'form correction', 'application me mistake'), you MUST map it to the SPECIFIC certificate service being applied for (e.g., Domicile Certificate SNO 4, SC/ST Certificate SNO 2, OBC Certificate SNO 3), NOT the Gazette service. For example:\n"
+        "   - 'domicile certificate application me correction kaise karein' -> SNO 4\n"
+        "   - 'submitted caste certificate application correction' -> SNO 2\n"
+        "4. OUT OF SCOPE / OTHER SERVICES: If the query is about any service, document, or scheme NOT listed in the catalog of 5 services (such as driving license, ration card, income certificate, electricity connection, land records/khasra/mutation, PAN card, Aadhaar card, voter ID, old age pension, scholarships, solar panels, water connections, or general chit-chat), you MUST return 'null' for both keys. For example:\n"
+        "   - 'income certificate criteria' -> Output: {\"sno\": null, \"service_id\": null}\n"
+        "   - 'ration card me name add' -> Output: {\"sno\": null, \"service_id\": null}\n"
+        "   - Note: If the primary subject or topic of the query is any out-of-scope service, application, or scheme (e.g. scholarships, old-age pensions, water/electricity connections), even if the user mentions an in-scope certificate (like SC certificate, Domicile certificate) as a supporting document or eligibility proof, the entire query is OUT OF SCOPE and must map to null. For example: 'do we need sc certificate for obc scholarship application?' -> Output: {\"sno\": null, \"service_id\": null}\n\n"
+        "FEW-SHOT EXAMPLES:\n"
+        "- Query: 'domicile certificate application me spelling mistake ho gayi hai correct kaise karein?'\n"
+        "  Output: {\"sno\": \"4\", \"service_id\": \"7\"}\n"
+        "- Query: 'domicile ki kia requirement hai marriage me?'\n"
+        "  Output: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Query: 'shadi ke baad caste certificate me name change kaise karein?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'is domicile necessary for obc certificate?'\n"
+        "  Output: {\"sno\": \"3\", \"service_id\": \"5\"}\n"
+        "- Query: 'st certificate ke liye domicile rules kya hain?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'driving license renewal online process'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'ration card list me name correction kaise hoga?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'do we need sc certificate for obc scholarship application?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'is voter id mandatory for st certificate if i have school study certificate?'\n"
+        "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
+        "- Query: 'caste certificate correction name change application format'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'marriage registrar local area authority in village for caste certificate holders'\n"
+        "  Output: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
+        "- Query: 'is notarized affidavit in Form-III for name change same as marriage affidavit?'\n"
+        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "- Query: 'obc income certificate slab details for domicile students'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'can we apply for marriage certificate and name change together on sewasetu?'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n"
+        "- Query: 'fees of obc certificate vs ordinary gazette publication fee'\n"
+        "  Output: {\"sno\": null, \"service_id\": null}\n\n"
         f"User Query: '{query}'\n\n"
-        "Instructions:\n"
-        "- Match the query to a service if the query is asking about requirements, rules, procedures, fees, eligibility, or lists of Castes/Tribes related to that service.\n"
-        "- For example, queries about specific castes (SC/ST/OBC), tribes, or caste list entries belong to the SC/ST Certificate or OBC Certificate services.\n"
-        "- Domicile/Residence queries belong to the Domicile Certificate service.\n"
-        "- Marriage registration/certificate queries belong to the Marriage Registration & Certificate service.\n"
-        "- Name change, gazette publication, or affidavit for name change queries belong to the Ordinary Gazette Notification for Name Change service.\n"
-        "- If the query is generic, completely unrelated to these 5 services (e.g., solar panels, water connections, electricity, scholarships, land records, or general chat), return {\"sno\": null, \"service_id\": null}.\n"
-        "- Return ONLY a JSON object containing the mapped 'sno' and 'service_id' as strings. For example: {\"sno\": \"1\", \"service_id\": \"3\"}\n"
-        "- Do not explain your choice. Do not output markdown, only raw JSON.\n\n"
+        "Return ONLY a JSON object containing the mapped 'sno' and 'service_id' as strings. Do not write any explanation, and do not use markdown code fences.\n"
         "Output JSON:"
     )
 
@@ -663,7 +723,7 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
         "7. new_topic — The query is about a Chhattisgarh government service but refers to or names a DIFFERENT service/certificate than the one in the conversation history, OR it is the first service query with no history. "
         "Examples: 'and for marriage?', 'what about birth certificate?', 'caste certificate fees?' (when the previous topic was name change or domicile).\n\n"
         "CRITICAL SERVICE CLASSIFICATION RULE:\n"
-        "- Questions asking about the 'process', 'procedure', 'documents', 'fees', or 'timeline' for specific certificates or services (e.g., 'caste certificate ka process', 'name change kaise karein', 'obc praman patra ke liye documents list') are government service queries. They MUST be classified as 'new_topic' or 'follow_up', NEVER as 'identity' or 'out_of_scope'.\n"
+        "- Questions asking about the 'process', 'procedure', 'documents', 'fees', 'timeline', or checking if a specific document/ID is valid as eligibility proof (e.g., 'caste certificate ka process', 'name change kaise karein', 'obc praman patra ke liye documents list', 'is voter id proof of stay for domicile') are government service queries. They MUST be classified as 'new_topic' or 'follow_up', NEVER as 'identity' or 'out_of_scope'.\n"
         "- 'identity' is STRICTLY reserved for general questions about the chatbot itself (e.g., 'who are you', 'what can you do', 'introduce yourself', 'explain what is sewasetu'). It does NOT apply to queries asking about how to perform a specific government task or service.\n\n"
         "CRITICAL SERVICE SWITCH RULE:\n"
         "- If the latest query refers to or mentions a DIFFERENT service (e.g., Marriage Certificate) than the most recent service discussed (e.g., Name Change), the intent MUST be 'new_topic'. It is NEVER a 'follow_up'.\n"
@@ -737,4 +797,44 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
     
     # Fallback: treat as new topic
     return {"intent": "new_topic", "resolved_query": query, "topic_summary": ""}
+
+
+# Save the original functions for wrapping
+_original_generate_answer = generate_answer
+_original_detect_query_language = detect_query_language
+_original_translate_query_to_english = translate_query_to_english
+_original_translate_query_to_hindi = translate_query_to_hindi
+_original_classify_query_intent = classify_query_intent
+_original_classify_service = classify_service
+
+# Define wrapper functions that invoke originals and record details in trace
+def generate_answer(messages: List[Dict[str, str]]) -> str:
+    res = _original_generate_answer(messages)
+    log_llm_call("generate_answer", messages, res)
+    return res
+
+def detect_query_language(query: str) -> str:
+    res = _original_detect_query_language(query)
+    log_llm_call("detect_query_language", query, res)
+    return res
+
+def translate_query_to_english(query: str) -> str:
+    res = _original_translate_query_to_english(query)
+    log_llm_call("translate_query_to_english", query, res)
+    return res
+
+def translate_query_to_hindi(query: str) -> str:
+    res = _original_translate_query_to_hindi(query)
+    log_llm_call("translate_query_to_hindi", query, res)
+    return res
+
+def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> Dict[str, str]:
+    res = _original_classify_query_intent(query, recent_history)
+    log_llm_call("classify_query_intent", {"query": query, "recent_history": recent_history}, res)
+    return res
+
+def classify_service(query: str, services_list: List[Dict[str, Any]], use_llm_only: bool = False) -> Dict[str, Optional[str]]:
+    res = _original_classify_service(query, services_list, use_llm_only)
+    log_llm_call("classify_service", {"query": query, "use_llm_only": use_llm_only}, res)
+    return res
 

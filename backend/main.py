@@ -250,33 +250,17 @@ def query_contains_service_keywords(query: str, resolved_query: str, service_id:
 
 def build_condensed_history(sanitized_history: list, is_follow_up: bool, topic_summary: str = "") -> list:
     """
-    Builds a condensed history for the final synthesis stage only.
+    Builds a condensed history for the final synthesis stage.
     
-    - For follow-ups: includes last 1 turn (2 messages) + a topic summary line
-      Only 1 turn to prevent cross-service contamination when switching topics
-    - For new topics: returns empty (no history needed)
+    To implement the 'Query Reformulation + Stateless QA' pattern and prevent
+    context leakage/attention hijacking (e.g. repeating document checklists 
+    when answering unrelated follow-up questions), history is completely 
+    eradicated from the final answer generation phase.
+    
+    History remains fully utilized in the classifier phase for intent detection 
+    and query rewriting/resolution.
     """
-    if not is_follow_up or not sanitized_history:
-        return []
-    
-    # Take only the last 2 messages (1 turn) — prevents older service context from leaking
-    recent = sanitized_history[-2:]
-    
-    condensed = []
-    if topic_summary:
-        condensed.append({
-            "role": "system",
-            "content": f"Previous conversation context: {topic_summary}"
-        })
-    
-    for msg in recent:
-        content = msg["content"]
-        # Truncate long assistant responses to keep context focused
-        if msg["role"] == "assistant" and len(content) > 300:
-            content = content[:300] + "\n... (truncated for brevity)"
-        condensed.append({"role": msg["role"], "content": content})
-    
-    return condensed
+    return []
 
 
 def is_checklist_query(query: str, english_query: str, hindi_query: str) -> bool:
@@ -434,13 +418,23 @@ def get_service_details(sno: str, lang: str = "en"):
 
 async def process_query_languages(query: str):
     """
-    Detects language and translates to English & Hindi concurrently.
+    Detects language and translates to English & Hindi conditionally.
     """
-    lang_task = asyncio.to_thread(detect_query_language, query)
-    en_task = asyncio.to_thread(translate_query_to_english, query)
-    hi_task = asyncio.to_thread(translate_query_to_hindi, query)
+    query_lang = await asyncio.to_thread(detect_query_language, query)
+    lang = (query_lang or "").strip().lower()
     
-    query_lang, english_query, hindi_query = await asyncio.gather(lang_task, en_task, hi_task)
+    if lang == "en":
+        english_query = query
+        hindi_query = await asyncio.to_thread(translate_query_to_hindi, query)
+    elif lang == "hi":
+        english_query = await asyncio.to_thread(translate_query_to_english, query)
+        hindi_query = query
+    else:
+        # Hinglish or other: translate to both
+        en_task = asyncio.to_thread(translate_query_to_english, query)
+        hi_task = asyncio.to_thread(translate_query_to_hindi, query)
+        english_query, hindi_query = await asyncio.gather(en_task, hi_task)
+        
     return query_lang, english_query, hindi_query
 
 
@@ -545,18 +539,18 @@ async def run_rag_pipeline_intermediates(
         query_lang, english_query, hindi_query = await process_query_languages(query)
 
     if query_lang == "en":
-        fallback_msg = "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal."
+        fallback_msg = "I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal."
     elif query_lang == "hi":
-        fallback_msg = "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।"
+        fallback_msg = "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।"
     else:
-        fallback_msg = "Main aapke prashn ka uttar dene ke liye paryapt jankari nahi rakhta. Kripya Sewa Setu portal par jaanch karein."
+        fallback_msg = "Mere paas is question ka answer dene ke liye records mein context ya paryapt information nahi hai. Kripya Sewa Setu portal par check karein."
 
     if service_id is None:
         return query_lang, english_query, hindi_query, "", "", fallback_msg
 
     # Retrieve English and Hindi contexts concurrently
-    context_en_task = asyncio.to_thread(retrieve_context, query, service_id, 6, english_query, hindi_query, "en")
-    context_hi_task = asyncio.to_thread(retrieve_context, query, service_id, 6, english_query, hindi_query, "hi")
+    context_en_task = asyncio.to_thread(retrieve_context, query, service_id, 4, english_query, hindi_query, "en")
+    context_hi_task = asyncio.to_thread(retrieve_context, query, service_id, 4, english_query, hindi_query, "hi")
     (context_en, metadata_en, checklist_text_en), (context_hi, metadata_hi, checklist_text_hi) = await asyncio.gather(context_en_task, context_hi_task)
 
     return query_lang, english_query, hindi_query, context_en, context_hi, fallback_msg
@@ -654,9 +648,18 @@ You are SewaSetu AI Assistant — a polite government services assistant for the
 - LANGUAGE AND SCRIPT RULES: {lang_instruction}
 - Be warm, respectful, and citizen-friendly.
 {service_rules_final}
-- MANDATORY DOCUMENTS: If a citizen asks about bypassing a mandatory document, clearly state 'No, you cannot apply without this document' and guide them on how to obtain it.
+- DOCUMENT MANDATORINESS RULE (REQUIRED VS OPTIONAL): When answering if a document is required, mandatory, or optional:
+  1. Check the 'REQUIRED DOCUMENTS' section in the context.
+  2. If a document category is marked as 'Mandatory: No' or 'Mandatory: नहीं', it is OPTIONAL (वैकल्पिक), not mandatory (अनिवार्य).
+  3. If a document category is optional, check the list of 'Supporting Documents' under it. These are alternative options. Explain that the applicant can submit ANY ONE of these alternatives (e.g. Electricity Bill, Ration Card, Voter ID, Domicile certificate) to satisfy that category, and that a Domicile Certificate (निवास प्रमाण पत्र) is NOT mandatory if other alternatives are provided.
+  4. Only state a document is mandatory (अनिवार्य) if it is explicitly marked as 'Mandatory: Yes' or 'Mandatory: हाँ'. If a citizen asks about bypassing an explicitly mandatory document, clearly state 'No, you cannot apply without this document' and guide them on how to obtain it.
+  5. If the user asks if X is required or needed (e.g., 'X लगता है क्या?', 'is X required?'), and X is optional (Mandatory: No / नहीं), you MUST begin your response by clearly stating that 'नहीं, X अनिवार्य नहीं है (यह वैकल्पिक है)।' (No, X is not mandatory; it is optional) and explain they can submit other alternative documents instead. Do NOT say 'Yes, X is required/essential'.
 - FEE INTERPRETATION: 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee' are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. Total application fee = fee for ONE method. If the citizen asks about total cost and the required documents mention monetary costs (challans, stamp paper, notarization), mention those as additional costs.
-- STRICT GROUNDING RULE (NO EXTRAPOLATION): You must ONLY answer using the facts directly stated in the ENGLISH SOURCE DOCUMENTS or HINDI SOURCE DOCUMENTS. Do NOT assume, extrapolate, or use external knowledge. If the provided source documents do not contain enough information to answer the user's specific query, you MUST reply EXACTLY with: \"I do not have sufficient information in my records to answer this question. Kripya Sewa Setu portal par check karein.\" (or its equivalent translation based on the query language: \"मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।\" for Hindi, and \"Mere paas is question ka answer dene ke liye records mein पर्याप्त information nahi hai. Kripya Sewa Setu portal par check karein.\" for Hinglish).
+- STRICT GROUNDING RULE (NO EXTRAPOLATION): You must ONLY answer using the facts directly stated in the ENGLISH SOURCE DOCUMENTS or HINDI SOURCE DOCUMENTS.
+  1. Do NOT assume, extrapolate, or use external knowledge.
+  2. If the user's query refers to a specific named individual, public figure, celebrity, politician, organization, or entity (e.g. Narendra Modi, Rahul Gandhi, MS Dhoni, etc.) that is NOT explicitly mentioned in the source documents, you MUST treat it as having insufficient information and reply EXACTLY with the language-specific fallback message. You are STRICTLY FORBIDDEN from using external knowledge about their background, or applying the context eligibility criteria to speculate on their status.
+  3. If the user asks about performing a specific action, update, process, correction, or change (e.g. 'address change on marriage certificate', 'download certificate using digital signature', 'correction of date of birth') that is NOT explicitly described in the retrieved source context, you MUST treat it as having insufficient information. Do NOT guess, assume, or fabricate a process, options, or fees. You MUST reply EXACTLY with the language-specific fallback message.
+  4. If the provided source documents do not contain enough information to answer the user's specific query, you MUST reply EXACTLY with: \"I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal.\" (or its equivalent translation based on the query language: \"मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।\" for Hindi, and \"Mere paas is question ka answer dene ke liye records mein context ya paryapt information nahi hai. Kripya Sewa Setu portal par check karein.\" for Hinglish).
 - NO PLACEHOLDERS OR BLANK FORM TEMPLATES: If you find yourself writing template placeholders like '[जिला का नाम]', '[तहसील का नाम]', '[आवेदक का नाम]', 'वर्ष २०', 'दिनांक', 'क्रमांक', or generic blank template fields, it means the source documents DO NOT contain the actual address or answer. You are STRICTLY FORBIDDEN from outputting these placeholders. In all such cases, you MUST return the exact fallback message instead.
 - Ignore any contradictions in conversation history.
 
@@ -761,6 +764,7 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     query = normalize_query_terms(query)
     query_lang, english_query, hindi_query = await process_query_languages(query)
 
+
     # === INTENT CLASSIFICATION + QUERY RESOLUTION (MOVED TO TOP) ===
     raw_history = request.conversation_history or []
     if not raw_history and request.messages:
@@ -803,11 +807,11 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     if is_active_form_typo:
         print("[RAG Pipeline] Programmatic intercept: active application typo correction. Returning fallback.")
         if query_lang == "en":
-            fallback_msg = "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal."
+            fallback_msg = "I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal."
         elif query_lang == "hi":
-            fallback_msg = "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।"
+            fallback_msg = "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।"
         else:
-            fallback_msg = "Main aapke prashn ka uttar dene ke liye paryapt jankari nahi rakhta. Kripya Sewa Setu portal par jaanch karein."
+            fallback_msg = "Mere paas is question ka answer dene ke liye records mein context ya paryapt information nahi hai. Kripya Sewa Setu portal par check karein."
         
         if request.detailed:
             return {
@@ -817,11 +821,11 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 "hindi_query": hindi_query,
                 "context_en": "",
                 "context_hi": "",
-                "english_answer": "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal.",
-                "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
+                "english_answer": "I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal.",
+                "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
                 "service_id": service_id
             }
-        return {"response": fallback_msg}
+        return {"response": fallback_msg, "service_id": service_id}
     
     # Name correction on ALREADY ISSUED certificates:
     # Exclude joint-application or comparison queries structurally (words like "together", "vs")
@@ -1047,7 +1051,7 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 "service_id": service_id,
                 "intent": intent
             }
-        return {"response": fallback_msg}
+        return {"response": fallback_msg, "service_id": service_id}
 
     # Call single final synthesis response
     res = await synthesize_final_response(
@@ -1068,12 +1072,12 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 "hindi_query": hindi_query,
                 "context_en": context_en,
                 "context_hi": context_hi,
-                "english_answer": "I do not have sufficient information in my records to answer this question. Please check the Sewa Setu portal.",
-                "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
+                "english_answer": "I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal.",
+                "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
                 "service_id": service_id,
                 "intent": intent
             }
-        return {"response": fallback_msg}
+        return {"response": fallback_msg, "service_id": service_id}
 
     if request.detailed and isinstance(res, dict):
         res["intent"] = intent
@@ -1099,6 +1103,16 @@ async def chat_with_bot(request: ChatRequest):
         query = request.query
         if not query and request.messages:
             query = request.messages[-1].content
+
+        # Handle option click query resolution
+        if request.is_option_click and request.messages and len(request.messages) >= 3:
+            last_msg = query or ""
+            if "directly answer" in last_msg.lower() or "सीधे अपने सवाल" in last_msg:
+                # Find the original user query before the assistant's option selection
+                original_query = request.messages[-3].content
+                if original_query:
+                    query = original_query
+                    print(f"[API Chat] Option click detected. Resolved query to original user question: '{query}'")
 
         if not query:
             raise HTTPException(status_code=400, detail="Query text is required.")

@@ -495,7 +495,7 @@ def classify_service(query: str, services_list: List[Dict[str, Any]], use_llm_on
         "- Query: 'is digital signature of sdo for st certificate same as domicile?'\n"
         "  Output: {\"sno\": \"2\", \"service_id\": \"4\"}\n"
         "- Query: 'gazette publication name change advertisement stamp paper vs marriage affidavit stamp paper'\n"
-        "  Output: {\"sno\": \"5\", \"service_id\": \"201\"}\n"
+        "  Output: {\"sno\": 5, \"service_id\": 201}\n"
     )
 
     hindi_few_shots = (
@@ -559,13 +559,17 @@ def classify_service(query: str, services_list: List[Dict[str, Any]], use_llm_on
         "   - 'caste certificate me name correction' -> SNO 5\n"
         "   - 'domicile me naam change process' -> SNO 5\n"
         "   - 'shadi ke baad name change kaise karein' -> SNO 5\n"
+        "   - Note on other corrections: If the query is about changing the ADDRESS, DATE OF BIRTH, or GENDER on an already issued certificate (e.g., 'marriage certificate me address change', 'caste certificate date of birth correction'), this is NOT name change and is NOT supported by the Gazette or any other service in our catalog. You MUST return 'null' for both keys. For example: 'marriage certificate me address change' -> Output: {\"sno\": null, \"service_id\": null}\n"
         "3. ACTIVE/PENDING APPLICATION FORM TYPOS: If the user asks about correcting a spelling mistake, typo, or details in an active, pending, draft, or submitted application form (e.g., 'application form', 'submitted application', 'form correction', 'application me mistake'), you MUST map it to the SPECIFIC certificate service being applied for (e.g., Domicile Certificate SNO 4, SC/ST Certificate SNO 2, OBC Certificate SNO 3), NOT the Gazette service. For example:\n"
         "   - 'domicile certificate application me correction kaise karein' -> SNO 4\n"
         "   - 'submitted caste certificate application correction' -> SNO 2\n"
         "4. OUT OF SCOPE / OTHER SERVICES: If the query is about any service, document, or scheme NOT listed in the catalog of 5 services (such as driving license, ration card, income certificate, electricity connection, land records/khasra/mutation, PAN card, Aadhaar card, voter ID, old age pension, scholarships, solar panels, water connections, or general chit-chat), you MUST return 'null' for both keys. For example:\n"
         "   - 'income certificate criteria' -> Output: {\"sno\": null, \"service_id\": null}\n"
         "   - 'ration card me name add' -> Output: {\"sno\": null, \"service_id\": null}\n"
-        "   - Note: If the primary subject or topic of the query is any out-of-scope service, application, or scheme (e.g. scholarships, old-age pensions, water/electricity connections), even if the user mentions an in-scope certificate (like SC certificate, Domicile certificate) as a supporting document or eligibility proof, the entire query is OUT OF SCOPE and must map to null. For example: 'do we need sc certificate for obc scholarship application?' -> Output: {\"sno\": null, \"service_id\": null}\n\n"
+        "   - Note: If the primary subject or topic of the query is any out-of-scope service, application, or scheme (e.g. scholarships, old-age pensions, water/electricity connections), even if the user mentions an in-scope certificate (like SC certificate, Domicile certificate) as a supporting document or eligibility proof, the entire query is OUT OF SCOPE and must map to null. For example: 'do we need sc certificate for obc scholarship application?' -> Output: {\"sno\": null, \"service_id\": null}\n"
+        "5. CROSS-SERVICE COMPARISONS / VS / DIFFERENCES: If a query asks to compare, contrast, or find the difference/versus between two or more different services (e.g. 'caste certificate vs domicile certificate fee', 'name change time limit compared to marriage certificate', 'ST certificate validity vs Domicile validity', 'ordinary gazette name change stamp paper vs marriage affidavit stamp paper'), you MUST return 'null' for both 'sno' and 'service_id'. Do NOT map it to either service. For example:\n"
+        "   - 'native certificate fee vs caste certificate fee' -> Output: {\"sno\": null, \"service_id\": null}\n"
+        "   - 'name change time limit vs marriage certificate time limit' -> Output: {\"sno\": null, \"service_id\": null}\n\n"
         "FEW-SHOT EXAMPLES:\n"
         "- Query: 'domicile certificate application me spelling mistake ho gayi hai correct kaise karein?'\n"
         "  Output: {\"sno\": \"4\", \"service_id\": \"7\"}\n"
@@ -718,13 +722,14 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
         "Examples: 'who are you', 'aap kaun ho', 'tum kaun ho', 'ye kya hai', 'what can you do', 'what is sewasetu'\n"
         "5. out_of_scope — The query is NOT about Chhattisgarh government services. This includes politics, general knowledge, celebrities, weather, sports, entertainment, math, coding, personal advice, or any topic unrelated to government services/certificates/documents/fees. "
         "Examples: 'modi kaun hai', 'who is the president', 'what is the weather', 'tell me a joke', '2+2 kya hai', 'capital of India'\n"
-        "6. follow_up — The query asks about the SAME government service/certificate as the MOST RECENT one in the conversation history — either a different aspect (fees, documents, eligibility, timeline) or a clarification. "
-        "Examples: 'what is the fee?', 'documents needed?', 'how long does it take?', 'eligibility criteria?' (when referring to the SAME service currently being discussed).\n"
+        "6. follow_up — The query asks about the SAME government service/certificate as the MOST RECENT one in the conversation history — either a different aspect (fees, documents, eligibility, timeline, SLA, time limit) or a clarification. "
+        "Examples: 'what is the fee?', 'documents needed?', 'how long does it take?', 'eligibility criteria?', 'what is the SLA?' (when referring to the SAME service currently being discussed).\n"
         "7. new_topic — The query is about a Chhattisgarh government service but refers to or names a DIFFERENT service/certificate than the one in the conversation history, OR it is the first service query with no history. "
-        "Examples: 'and for marriage?', 'what about birth certificate?', 'caste certificate fees?' (when the previous topic was name change or domicile).\n\n"
+        "Examples: 'and for marriage?', 'what about birth certificate?', 'caste certificate fees?', 'sla for domicile' (when the previous topic was name change or marriage, or when starting a new session).\n\n"
         "CRITICAL SERVICE CLASSIFICATION RULE:\n"
-        "- Questions asking about the 'process', 'procedure', 'documents', 'fees', 'timeline', or checking if a specific document/ID is valid as eligibility proof (e.g., 'caste certificate ka process', 'name change kaise karein', 'obc praman patra ke liye documents list', 'is voter id proof of stay for domicile') are government service queries. They MUST be classified as 'new_topic' or 'follow_up', NEVER as 'identity' or 'out_of_scope'.\n"
-        "- 'identity' is STRICTLY reserved for general questions about the chatbot itself (e.g., 'who are you', 'what can you do', 'introduce yourself', 'explain what is sewasetu'). It does NOT apply to queries asking about how to perform a specific government task or service.\n\n"
+        "- Questions asking about the 'process', 'procedure', 'documents', 'fees', 'timeline', 'SLA', 'time limit', or checking if a specific document/ID is valid as eligibility proof (e.g., 'caste certificate ka process', 'name change kaise karein', 'obc praman patra ke liye documents list', 'is voter id proof of stay for domicile', 'sla for domicile') are government service queries. They MUST be classified as 'new_topic' or 'follow_up', NEVER as 'identity' or 'out_of_scope'.\n"
+        "- 'identity' is STRICTLY reserved for general questions about the chatbot itself (e.g., 'who are you', 'what can you do', 'introduce yourself', 'explain what is sewasetu'). It does NOT apply to queries asking about how to perform a specific government task or service.\n"
+        "- If the query asks about a specific named individual, public figure, celebrity, politician, or historic person (e.g., Narendra Modi, Amitabh Bachchan, Rahul Gandhi, MS Dhoni, etc.), even if they are asking about their eligibility, certificate, or documents (e.g. 'narendra modi ke pass domicile certificate hoga?'), you MUST classify it as 'out_of_scope'. General citizen services apply to general public queries, not to named public figures.\n\n"
         "CRITICAL SERVICE SWITCH RULE:\n"
         "- If the latest query refers to or mentions a DIFFERENT service (e.g., Marriage Certificate) than the most recent service discussed (e.g., Name Change), the intent MUST be 'new_topic'. It is NEVER a 'follow_up'.\n"
         "- Even if the query is short and relies on carrying over the aspect from history (e.g., 'and for marriage?' asking about fees after discussing name change fees), it is still a 'new_topic' because the service itself has changed.\n\n"
@@ -779,6 +784,21 @@ def classify_query_intent(query: str, recent_history: List[Dict[str, str]]) -> D
                 intent = result.get("intent", "new_topic")
                 resolved = result.get("resolved_query", query)
                 summary = result.get("topic_summary", "")
+                
+                # Heuristic guardrail: If classified as non-service, but query has service keywords, override to new_topic
+                if intent in ["greeting", "farewell", "thanks", "identity"]:
+                    q_lower = query.lower()
+                    service_keywords = [
+                        "domicile", "caste", "marriage", "gazette", "sc", "st", "obc", "residence",
+                        "shadi", "vivah", "jati", "niwas", "praman", "naam", "name", "gazette", "sla",
+                        "fee", "cost", "rupees", "rs", "charge", "document", "paper", "proof", "timeline",
+                        "days", "time", "apply", "kiosk", "portal", "online", "offline", "process", "procedure",
+                        "राजपत्र", "विवाह", "शादी", "जाति", "निवास", "प्रमाण", "शुल्क", "दस्तावेज"
+                    ]
+                    if any(k in q_lower for k in service_keywords):
+                        print(f"[LLM Router] Heuristic override: classified as '{intent}' but contains service keywords. Overriding to 'new_topic'.")
+                        intent = "new_topic"
+                        resolved = query
                 
                 # Validate intent value
                 if intent not in valid_intents:

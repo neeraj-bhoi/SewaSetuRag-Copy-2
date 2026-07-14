@@ -89,10 +89,6 @@ def rerank_chunks(
         # Combine scores (semantic similarity weighted at 0.7, lexical overlap at 0.3)
         hybrid_score = 0.7 * semantic_sim + 0.3 * lexical_score
         
-        # Give combined_manuals an edge/boost
-        if chunk["metadata"].get("section") == "combined_manual":
-            hybrid_score += 0.1
-
         chunk["hybrid_score"] = hybrid_score
         scored_chunks.append(chunk)
 
@@ -121,9 +117,8 @@ def retrieve_context(
     Retrieves top_k target-language chunks from ChromaDB, reranks them, 
     and returns a structured context string from the top 4 chunks.
     """
-    # Increase retrieve size if no specific service filter is specified
-    if service_id is None:
-        top_k = max(top_k, 15)
+    # Increase retrieve size to get a robust mix of manual and official chunks
+    top_k = max(top_k, 15)
 
     # Determine query to use based on target database language
     if lang == "hi" and hindi_query:
@@ -237,16 +232,19 @@ def retrieve_context(
 
     # Rerank other chunks and combine with checklist chunk
     if checklist_chunk:
-        top_other_chunks = rerank_chunks(query, top_chunks, top_n=3, english_query=english_query, hindi_query=hindi_query)
-        top_4_chunks = [checklist_chunk] + top_other_chunks
+        top_other_chunks = rerank_chunks(query, top_chunks, top_n=5, english_query=english_query, hindi_query=hindi_query)
+        top_6_chunks = [checklist_chunk] + top_other_chunks
     else:
-        top_4_chunks = rerank_chunks(query, top_chunks, top_n=4, english_query=english_query, hindi_query=hindi_query)
+        top_6_chunks = rerank_chunks(query, top_chunks, top_n=6, english_query=english_query, hindi_query=hindi_query)
 
     # If the top match has a very low hybrid score, the query is likely out-of-scope.
     # We bypass this check if we have pinned a checklist chunk since it is definitely in-scope.
-    if not checklist_chunk and top_4_chunks and top_4_chunks[0].get("hybrid_score", 0.0) < 0.35:
-        print(f"[RAG] Warning: Top hybrid score {top_4_chunks[0].get('hybrid_score', 0.0):.4f} is below threshold 0.35. Treating as out-of-scope.")
+    if not checklist_chunk and top_6_chunks and top_6_chunks[0].get("hybrid_score", 0.0) < 0.35:
+        print(f"[RAG] Warning: Top hybrid score {top_6_chunks[0].get('hybrid_score', 0.0):.4f} is below threshold 0.35. Treating as out-of-scope.")
         return "", [], None
+
+    # Prioritize official rules and documents at the top of the context to prevent lost-in-the-middle bias
+    # top_6_chunks.sort(key=lambda x: 0 if x["metadata"].get("section") == "official_document" else 1)
 
     # Build structured context string with labels
     context_parts = []
@@ -255,17 +253,42 @@ def retrieve_context(
     if checklist_chunk:
         raw_checklist_text = checklist_chunk["text"]
 
-    for idx, chunk in enumerate(top_4_chunks):
+    for idx, chunk in enumerate(top_6_chunks):
         meta = chunk["metadata"]
         doc_type = meta.get("doc_type", "web")
         lang_label = "English" if meta.get("lang") == "en" else "Hindi"
-        label = f"Official Specification ({lang_label})" if doc_type == "web" else f"User Manual ({lang_label})"
+        section = meta.get("section", "combined_manual")
+        if section == "official_document":
+            label = f"Official Rules/Legislation ({lang_label})"
+        else:
+            label = f"Service Details & Manual ({lang_label})"
         
         # Clean EasyOCR character mistranslations
         cleaned_text = chunk['text']
         cleaned_text = re.sub(r'\b[Ll]०\b', '10', cleaned_text)
         cleaned_text = re.sub(r'\b[Ll]२\b', '12', cleaned_text)
         cleaned_text = cleaned_text.replace("L०", "10").replace("L२", "12").replace("l०", "10").replace("l२", "12")
+        
+        # Normalize all Devanagari digits to Roman digits
+        dev_to_rom = {'०': '0', '१': '1', '२': '2', '३': '3', '४': '4', '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'}
+        for dev_char, rom_char in dev_to_rom.items():
+            cleaned_text = cleaned_text.replace(dev_char, rom_char)
+            
+        # Clean OCR headers, footers and page separators to preserve sentence continuity
+        cleaned_text = re.sub(r'(?i)legitquest.*', '', cleaned_text)
+        cleaned_text = re.sub(r'(?i)Printed For:.*', '', cleaned_text)
+        cleaned_text = re.sub(r'(?i)THE CHHATTISGARH COMPULSORY REGISTRATION OF MARRIAGES RULES.*', '', cleaned_text)
+        cleaned_text = re.sub(r'--- Page \d+.*', '', cleaned_text)
+        
+        # Collapse multi-newlines
+        cleaned_text = re.sub(r'\n\s*\n', '\n', cleaned_text).strip()
+        
+        # Strip huge form fields section if the query is not asking about form fields/columns
+        text_to_check = f"{query} {english_query or ''} {hindi_query or ''}".lower()
+        fields_keywords = ["field", "column", "form details", "fill", "कॉलम", "फील्ड", "फ़ॉर्म", "फॉर्म"]
+        is_fields_query = any(k in text_to_check for k in fields_keywords)
+        if not is_fields_query and "APPLICATION FORM FIELDS:" in cleaned_text:
+            cleaned_text = cleaned_text.split("APPLICATION FORM FIELDS:")[0].strip()
         
         context_parts.append(
             f"--- Source {idx+1}: [{label}] ---\n"

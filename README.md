@@ -6,7 +6,7 @@ SewaSetu RAG Chatbot is an enterprise-grade Retrieval-Augmented Generation (RAG)
 
 ## 📐 System Architecture
 
-The following diagram illustrates the end-to-end query processing and retrieval pipeline of the SewaSetu RAG Chatbot:
+The following diagram illustrates the end-to-end query processing, two-stage service routing, RAG retrieval, consensus synthesis, and real-time grounding guardrail pipeline:
 
 ```mermaid
 graph TD
@@ -14,11 +14,20 @@ graph TD
     B --> C{Query Language?}
     C -->|English| D[Generate Hindi Translation]
     C -->|Hindi / Hinglish| E[Generate English Translation]
-    D & E --> F[Auto-Classify Service Category]
-    F --> G[Query ChromaDB for Target Language Chunks]
-    F --> H{Query contains document keywords?}
+    
+    %% Two-Stage Service Routing
+    D & E --> F{Intent == new_topic?}
+    F -->|Yes| TwoStageRouting[Two-Stage Service Routing]
+    TwoStageRouting --> Stage1[Stage 1: Cosine Similarity Vector Search over Service Descriptions]
+    Stage1 -->|Top 3 Candidates| Stage2[Stage 2: LLM Service Selector]
+    Stage2 --> G[Query ChromaDB for Target Language Chunks]
+    
+    F -->|No| G
+    
+    G --> H{Query contains document keywords?}
     H -->|Yes| I[Locate & Pin REQUIRED DOCUMENTS Chunk to Rank 1]
     H -->|No| J[Proceed with search]
+    
     G & I --> K[Language-Aware Hybrid Reranker]
     K --> L[Boost combined_manual chunks by +0.1]
     L --> M[Inject Retrieved Context into System Prompt & Call Sarvam AI]
@@ -27,7 +36,13 @@ graph TD
     O --> P[Script Enforcement & Devanagari Leakage Safety Net]
     P --> Q[Response Post-Processing & Markdown Link Sanitizer]
     Q --> R[Append Single Verified Redirection Button]
-    R --> S[Final Synthesized Output]
+    
+    %% Grounding Guardrail
+    R --> S[llm_router.py: verify_answer_grounding LLM Validator]
+    S --> T{Grounded in context?}
+    T -->|Yes| U[Final Synthesized Output]
+    T -->|No| V[Override response with standard Fallback Message]
+    V --> U
 ```
 
 ---
@@ -37,28 +52,38 @@ graph TD
 ### 1. Multilingual Orchestration & Normalization
 * **Language Classifier:** Automatically detects query language (`en`, `hi`, `hinglish`) using the LLM.
 * **Dual-Query Translation:** Translates user queries bidirectionally (English <-> Hindi) using `sarvam-translate:v1` to perform cross-lingual RAG retrieval.
-* **Term Normalization:** Resolves dialect/colloquial variances (e.g., matching "niwas praman patra", "residence certificate", and "मूल निवासी प्रमाण पत्र" to a single unified service category).
+* **Term Normalization:** Resolves dialect/colloquial variances (e.g., mapping "niwas praman patra", "residence certificate", and "मूल निवासी प्रमाण पत्र" to a single unified service category).
 
-### 2. Hybrid Reranking & Portal Prioritization
+### 2. Scalable Two-Stage Service Routing
+To support scaling to hundreds of G2C services without prompt pollution or classification degradation:
+* **Stage 1 (Semantic Candidate Search):** Automatically embeds the query using `multilingual-e5-large` and performs a cosine similarity search against service catalog descriptions in `data/rag_kb_manifest.json` to retrieve the **Top 3** candidate services.
+* **Stage 2 (LLM Classification):** Prompts the LLM to classify the query to one of these Top 3 candidates, adding specialized targeting exception rules (e.g., routing Domicile eligibility queries to Domicile rather than over-generalizing to Caste).
+
+### 3. Hybrid Reranking & Portal Prioritization
 * **Semantic Embedding:** Embeds chunks using the `intfloat/multilingual-e5-large` model.
 * **Hybrid Scoring System:** Reranks candidate database chunks using a composite score:
   $$\text{Score} = 0.7 \times \text{Semantic Similarity} + 0.3 \times \text{Lexical Overlap}$$
 * **Portal Boost (+0.1):** Dynamically applies a `+0.1` boost to all `combined_manual` portal specification chunks. This prioritizes portal rules over raw legal notification texts (such as gazettes and rulebooks) which may be outdated or lack implementation checklists.
 * **Devanagari Tokenizer:** Utilizes a Unicode-aware word boundary tokenizer that preserves Hindi half-letters and conjuncts, preventing lexical score dilution.
 
-### 3. Checklist Pinning & Context Routing
+### 4. Checklist Pinning & Context Routing
 * **Intelligent Pinning:** When the query mentions document requirements, checklist, fees, or timeline keywords, the backend isolates the specific service's `REQUIRED DOCUMENTS` table chunk and pins it directly to **Rank 1** of the context.
 * **Dynamic Pool Expansion:** Expands search pool to `top_k = 15` chunks when a user queries without specifying a service category (`service_id=None`) to prevent relevant chunks from being crowded out.
 
-### 4. API Resilience & Clean Post-Processing
+### 5. Grounding Verification Guardrail (Anti-Hallucination)
+To enforce 100% factual accuracy and ensure that the chatbot **only answers using the context**:
+* **Factual Check (`verify_answer_grounding`):** After response generation, the backend runs a zero-temperature LLM validation call comparing the synthesized answer against the compiled RAG context.
+* **Factual Override:** If the generated response contains any details, numbers, fees, or timelines that do **not** exist in the retrieved context (detecting hallucinations), the validator flags it as ungrounded and overrides the output with the standard fallback message (*"मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी नहीं है..."*).
+
+### 6. API Resilience & Clean Post-Processing
 * **Transient Error Handling:** Utilizes an exponential backoff retry mechanism (`_post_with_retry`) on all Sarvam completions to handle transient 500, 502, 503, 504 errors and API timeouts.
 * **URL Sanitizer:** Strips LLM-generated markdown links or buttons from final outputs and appends a single, verified redirection button linking to the official portal page.
 
-### 5. Contextual Grounding & Response Quality
+### 7. Contextual Grounding & Response Quality
 * **Contextual Grounding:** Retrieved chunks are directly embedded into the LLM system prompts for both intermediate (English/Hindi) answer generation, ensuring the LLM is grounded on actual database content rather than its parametric knowledge.
 * **Dynamic Rules Injection:** To prevent prompt pollution, service-specific instructions (such as Domicile eligibility rules or Marriage solemnization registration jurisdiction rules) are loaded dynamically based on the active `service_id` and injected directly into the prompt layers, keeping the global prompts clean.
 * **State-Aware History & Context Isolation:** Cleans conversation history using `sanitize_history`, limits history to the last 6 messages (3 turns) on the client, and restricts RAG generation history to the last 1 turn plus a previous topic summary to solve "triple-amplification". For service switches, history is completely cleared.
-* **Prompt-Based Classifier Safety Nets:** Tuning instructions in `llm_router.py` prevent service process, fee, or document queries (e.g. Hinglish "caste certificate kaise banayein") from being hijacked by early canned responses (like `identity` or `out_of_scope`).
+* **Prompt-Based Classifier Safety Nets:** Tuning instructions in `llm_router.py` prevent service process, fee, or document queries (e.g. Hinglish "caste certificate kaise banayein") from being incorrectly hijacked by early canned responses (like `identity` or `out_of_scope`).
 * **Programmatic Switch Safety Net:** If the classifier fails during an active service switch, `query_contains_service_keywords()` intercepts the switch, overrides the intent to `new_topic`, and clears history to isolate the database context.
 * **Eligibility Criteria Awareness:** The system prompts instruct the LLM to read ALL eligibility criteria, rules, and exceptions from the context before answering — including alternative criteria for spouses, government employees, property holders, and other special cases. Domicile eligibility requires strictly splitting the main path rules into two distinct requirements under separate headers (Criteria One and Criteria Two) and enforcing that both must be satisfied.
 * **Forbidden Information Conciseness:** The LLM is instructed to answer ONLY what the citizen asked, without volunteering unrelated information. If the query is about eligibility, the LLM is strictly forbidden from outputting document lists, process steps, fees, timelines, or contacts. If the query is about a single attribute (SLA, fee, department, or contact), the LLM must return ONLY that value and exclude other metadata fields.
@@ -77,7 +102,7 @@ SewaSetuRag/
 ├── backend/                             # Python FastAPI Backend
 │   ├── main.py                          # API router, request schemas, translation, response synthesis
 │   ├── rag.py                           # Vector search client, checklist pinning, custom hybrid reranker
-│   └── llm_router.py                    # Sarvam AI API clients, service classifier, and HTTP retry wrapper
+│   └── llm_router.py                    # Sarvam AI API clients, service classifier, HTTP retry, and grounding check
 ├── frontend/                            # Vite-React Single Page Application
 │   ├── public/                          # Static assets and icons
 │   ├── src/
@@ -87,7 +112,7 @@ SewaSetuRag/
 │   │   ├── main.jsx                     # React client renderer
 │   │   ├── assets/                      # Shared vector graphics
 │   │   └── components/
-│   │       └── DocumentChecklist.jsx    # Interactive checklist component with eligibility logic
+90: │   │       └── DocumentChecklist.jsx    # Interactive checklist component with eligibility logic
 │   ├── package.json                     # NPM script definitions and packages
 │   └── vite.config.js                   # Vite configuration
 ├── ingestion/                           # Raw Document Processing Pipeline
@@ -108,6 +133,7 @@ SewaSetuRag/
 ├── .env.example                         # Template configuration environment file
 ├── api.md                               # API endpoint schemas & float widget web integration guide
 ├── history.md                           # Chat history tracking architecture & data flow diagrams
+├── answerRetrieval.md                   # RAG context retrieval and LLM synthesis workflow guide
 └── README.md                            # Comprehensive project guide
 ```
 
@@ -224,45 +250,11 @@ To run a comprehensive test of 50 queries covering basic information, tough/deta
 ```bash
 python test_50_queries.py
 ```
-This progressively logs results after every question and saves the full audit report as [test_results5.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results5.md) showing:
-* Response latencies.
-* Language detection accuracy.
-* Auto-mapped Service IDs.
-* Full bot responses in English, Hindi, and Hinglish.
+This progressively logs results after every question and saves the full audit report as [test_results5.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results5.md) showing response latencies, language detection accuracy, and Service ID mapping.
 
-> [!NOTE]
-> The active test execution scripts `run_document_queries_evaluation.py` and `test_50_queries.py` represent the validation framework. If these runner scripts are omitted from your workspace distribution, the previously audited results are preserved for inspection directly in the static report files: [test_results5.md](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/test_results5.md) and `document_queries_evaluation_report.md`.
-
----
-
-## 🌐 API Endpoint Documentation
-
-### 1. List All Services
-* **Route:** `GET /api/services`
-* **Response Payload Structure:**
-```json
-[
-  {
-    "sno": "3",
-    "service_id": 3,
-    "name_en": "Marriage Registration & Certificate",
-    "name_hi": "विवाह पंजीकरण एवं प्रमाण पत्र",
-    "dept_en": "Urban Administration and development Department",
-    "dept_hi": "नगरीय प्रशासन एवं विकास विभाग",
-    "is_internal": true
-  }
-]
+### 3. Confusing Hindi Queries Validation Suite
+To validate classification, RAG grounding, and anti-hallucination overrides on confusing Devanagari Hindi citizen queries:
+```bash
+python tests/run_confused_validation_hindi.py
 ```
-
-### 2. Chat with RAG Bot
-* **Route:** `POST /api/chat`
-* **Request Payload Structure:**
-```json
-{
-  "query": "Is a Marriage Invitation Card mandatory for marriage registration?",
-  "service_id": 3,
-  "lang": "en",
-  "detailed": true
-}
-```
-* **Response Output:** Returns an SSE stream that yields the final synthesized text block, structured checklist confirmations, and the redirection target URL.
+This validates 50 complex and confusing queries typed directly in Hindi script and saves the audit logs to `tests/confused_queries_results_hindi.md`.

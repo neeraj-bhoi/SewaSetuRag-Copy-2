@@ -6,7 +6,7 @@ This document explains in detail how conversation history is stored, processed, 
 
 ## 1. High-Level History Workflow
 
-The diagram below illustrates how user query history flows from the frontend client to the backend RAG pipeline and final synthesis:
+The diagram below illustrates how user query history flows from the frontend client through backend intent classification, context switches, RAG processing, and the final grounding guardrail check:
 
 ```mermaid
 graph TD
@@ -35,7 +35,13 @@ graph TD
     
     P --> R[Final Synthesis LLM Call]
     Q --> R
-    R --> S[Romanization Safety Net & Return Response]
+    
+    %% Grounding Guardrail Check
+    R --> T[backend/llm_router.py: verify_answer_grounding]
+    T --> U{Grounded in context?}
+    U -->|Yes| S[Return Response Payload]
+    U -->|No| V[Override with Language-Specific Fallback Msg]
+    V --> S
 ```
 
 ---
@@ -74,7 +80,7 @@ When a new query arrives, it is classified in the context of the sanitized histo
 
 ## 4. History Isolation & Safety Nets
 
-To prevent context contamination (e.g., marriage timeline showing up when asking about domicile), the backend uses two main isolation techniques:
+To prevent context contamination (e.g., marriage timeline showing up when asking about domicile), the backend uses three main isolation techniques:
 
 ### A. Link-Based Service Tracking
 - The backend parses redirect links inside the assistant's previous message to find the active service (e.g., `serviceId=3`).
@@ -91,6 +97,9 @@ To prevent context contamination (e.g., marriage timeline showing up when asking
   - **For `new_topic`**: Returns `[]`. The history is cleared so that the previous service's context does not leak into the new response.
   - **For `follow_up`**: Returns only the **last 1 turn (2 messages)** + a concise `topic_summary` indicating what is being discussed. This strictly prevents the **triple-amplification problem** where old details are synthesized repeatedly.
 
+### D. Grounding Defences (Anti-Hallucination)
+- **Role**: Even if history contains ambiguous information or a service switch is incorrectly classified leading to slightly off-topic RAG context retrieval, the **Grounding Verification Guardrail** (`verify_answer_grounding`) acts as a final safety check. It ensures that the generated response is strictly grounded in the retrieved chunks before presenting it to the citizen, preventing hallucination leakage caused by context drift.
+
 ---
 
 ## 5. Function-by-Function Reference
@@ -101,7 +110,7 @@ To prevent context contamination (e.g., marriage timeline showing up when asking
 * **Returns**: Filtered list of dictionaries containing only `role` and `content` keys for valid text exchanges.
 
 ### 2. `classify_query_intent(query: str, history_msgs: list) -> Dict[str, str]`
-* **File**: [backend/llm_router.py](file:///c:/Users/hp/Desktop/sewa%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/backend/llm_router.py)
+* **File**: [backend/llm_router.py](file:///c:/Users/hp%20setu%20copies/SewaSetuRag%20-%20Copy%20(2)/backend/llm_router.py)
 * **Arguments**: Current user query and sanitized history.
 * **Returns**: JSON dictionary with `intent`, `resolved_query` (fully self-contained rewrite), and `topic_summary` details.
 

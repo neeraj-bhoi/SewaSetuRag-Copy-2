@@ -70,7 +70,8 @@ All API endpoints are hosted by FastAPI (running on port `8000` by default). Bel
   "is_option_click": false
 }
 ```
-* **Response Modes**:
+* **Response Generation Safety (Grounding Guardrail):** Before returning a response, the backend routes the output through a zero-temperature grounding check (`verify_answer_grounding`). If the response contains any ungrounded facts, numbers, or rules that do not exist in the retrieved context, it is overridden with the fallback message.
+* **Response Format Modes**:
   1. **Standard Text Mode** (`detailed=true`): Returns the answer and intermediate translation steps.
      ```json
      {
@@ -116,7 +117,9 @@ All API endpoints are hosted by FastAPI (running on port `8000` by default). Bel
 * **URL**: `/api/search`
 * **Method**: `POST`
 * **Request Payload**: `{"query": "caste certificate"}`
-* **Description**: Matches raw user query to the correct service `sno` and `service_id` via LLM classification.
+* **Description**: Matches raw user query to the correct service `sno` and `service_id` via a scalable **Two-Stage Routing** system:
+  1. **Stage 1 (Semantic Search):** Generates query embeddings and calculates cosine similarity over candidate service descriptions to retrieve the Top 3 services.
+  2. **Stage 2 (LLM Constrained Classification):** Prompts the LLM to select from these 3 candidates, returning the final `sno` and `service_id`.
 * **Response Format**:
 ```json
 {
@@ -134,22 +137,22 @@ All API endpoints are hosted by FastAPI (running on port `8000` by default). Bel
 
 ---
 
-## 2. Conversation History Functions
+## 2. Core Backend RAG & LLM Routing Functions
 
-The backend coordinates context isolation and query resolution through these key functions inside `backend/main.py`:
+The backend coordinates context isolation, service switching, and output verification through these key functions inside `backend/main.py` and `backend/llm_router.py`:
 
 1. **`sanitize_history(messages)`**: 
-   Filters the incoming client messages. It drops empty content, ignores system messages, and returns a sanitized list containing only `user` and `assistant` role dictionary exchanges.
+   Filters the incoming client messages, dropping empty content, special checklists, and system rules. It returns a sanitized list containing only `user` and `assistant` role dictionary exchanges.
 2. **`classify_query_intent(query, history)`**:
-   Leverages the LLM router to analyze the query in the context of the conversation history. It returns the detected intent (`greeting`, `farewell`, `thanks`, `identity`, `out_of_scope`, `follow_up`, `new_topic`), the `resolved_query` (vague follow-ups rewritten to self-contained queries), and a `topic_summary`.
-3. **`query_contains_service_keywords(query, resolved_query, service_id)`**:
-   Validates service switches programmatically. If the LLM router mistakenly classifies a service switch query as a `follow_up`, this function detects new service keywords and overrides the intent to `new_topic` to avoid contaminating context.
-4. **`build_condensed_history(sanitized_history, is_follow_up, topic_summary)`**:
-   Prepares the history context for the final response synthesis:
-   - For `new_topic` (service switch): Returns `[]` (clears context, preventing leakage).
-   - For `follow_up`: Returns only the **last 1 turn (2 messages)** + a concise previous topic context summary to prevent historical context magnification.
-5. **`get_intent_response(intent, query)`**:
-   Early interceptor. If the intent is non-informational (greeting, farewell, thanks, identity, out_of_scope), it returns the correct canned response in the user's language without executing the RAG pipeline or RAG database calls.
+   Analyzes the query in the context of the conversation history. It returns the detected intent (`greeting`, `farewell`, `thanks`, `identity`, `out_of_scope`, `follow_up`, `new_topic`), the `resolved_query` (vague follow-ups rewritten to self-contained queries), and a `topic_summary`.
+3. **`classify_service(query, services_list, use_llm_only)`**:
+   Leverages the **Two-Stage Retrieval Routing** process to dynamically map queries to correct service catalog IDs (1 to 5) when `intent == "new_topic"`.
+4. **`verify_answer_grounding(context, response)`**:
+   Grounding Guardrail. Executes a fast, zero-temperature completion call with Sarvam AI. Compares the generated response against the compiled context. Returns `True` if grounded, or `False` if it contains ungrounded factual details, enabling automatic fallback overrides.
+5. **`build_condensed_history(sanitized_history, is_follow_up, topic_summary)`**:
+   Prepares the history context for final response synthesis. Clears context (`[]`) on service switches to prevent context leakage, and returns only the last 1 turn on follow-ups to prevent historical magnification.
+6. **`get_intent_response(intent, query)`**:
+   Early interceptor. If the intent is greeting, farewell, thanks, identity, or out_of_scope, it returns the correct canned response in the user's language without executing the RAG pipeline or RAG database calls.
 
 ---
 

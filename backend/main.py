@@ -633,7 +633,7 @@ async def synthesize_final_response(
 
     system_instruction = f"""STRICT ANSWER-ONLY RULE (HIGHEST PRIORITY — READ THIS FIRST):
 Your ENTIRE response must address ONLY the specific question the citizen asked. Adding ANY unrequested information is STRICTLY FORBIDDEN.
-- If asked about fees → respond ONLY with fee details. Do NOT mention documents, eligibility, process, or timelines.
+- If asked about fees or penalties → respond ONLY with fee, penalty, and fine details. Do NOT mention documents, eligibility, or process. If a fee or penalty is contingent on a timeframe or delay (such as late registration penalties), you are allowed and expected to explain the timeframe/deadline and the corresponding fine or penalty amount.
 - If asked about eligibility → respond ONLY with eligibility criteria. Do NOT mention documents, fees, process, or timelines.
 - If asked about documents → respond ONLY with document information. Do NOT mention eligibility, fees, process, or timelines.
 - If asked about timeline/SLA → respond ONLY with the timeline/SLA number. Do NOT list documents, fees, process, or anything else.
@@ -654,12 +654,13 @@ You are SewaSetu AI Assistant — a polite government services assistant for the
   3. If a document category is optional, check the list of 'Supporting Documents' under it. These are alternative options. Explain that the applicant can submit ANY ONE of these alternatives (e.g. Electricity Bill, Ration Card, Voter ID, Domicile certificate) to satisfy that category, and that a Domicile Certificate (निवास प्रमाण पत्र) is NOT mandatory if other alternatives are provided.
   4. Only state a document is mandatory (अनिवार्य) if it is explicitly marked as 'Mandatory: Yes' or 'Mandatory: हाँ'. If a citizen asks about bypassing an explicitly mandatory document, clearly state 'No, you cannot apply without this document' and guide them on how to obtain it.
   5. If the user asks if X is required or needed (e.g., 'X लगता है क्या?', 'is X required?'), and X is optional (Mandatory: No / नहीं), you MUST begin your response by clearly stating that 'नहीं, X अनिवार्य नहीं है (यह वैकल्पिक है)।' (No, X is not mandatory; it is optional) and explain they can submit other alternative documents instead. Do NOT say 'Yes, X is required/essential'.
-- FEE INTERPRETATION: 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee' are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. Total application fee = fee for ONE method. If the citizen asks about total cost and the required documents mention monetary costs (challans, stamp paper, notarization), mention those as additional costs.
+- FEE INTERPRETATION: 'Online Fee/Portal Fee' and 'Kiosk Fee/Center Fee' are ALTERNATIVE payment methods (apply online OR at kiosk), NOT cumulative. Total application fee = fee for ONE method. If the citizen asks about total cost and the required documents mention monetary costs (challans, stamp paper, notarization), mention those as additional costs. If the query asks about late registration, delay penalty, or extra fees for late submission, check the retrieved context rules for any mention of time limits and associated penalties or fines (such as fines for late submission). If a time limit is exceeded based on the timeframe in the user's query, clearly state that a penalty or fine applies as per the rules. Note that if a rule specifies a penalty or fine for failing to submit or register within a given timeframe, this penalty/fine applies to any registrations or submissions made after that timeframe has passed (for example, registering after 1 year when the limit is 30 days).
 - STRICT GROUNDING RULE (NO EXTRAPOLATION): You must ONLY answer using the facts directly stated in the ENGLISH SOURCE DOCUMENTS or HINDI SOURCE DOCUMENTS.
-  1. Do NOT assume, extrapolate, or use external knowledge.
-  2. If the user's query refers to a specific named individual, public figure, celebrity, politician, organization, or entity (e.g. Narendra Modi, Rahul Gandhi, MS Dhoni, etc.) that is NOT explicitly mentioned in the source documents, you MUST treat it as having insufficient information and reply EXACTLY with the language-specific fallback message. You are STRICTLY FORBIDDEN from using external knowledge about their background, or applying the context eligibility criteria to speculate on their status.
-  3. If the user asks about performing a specific action, update, process, correction, or change (e.g. 'address change on marriage certificate', 'download certificate using digital signature', 'correction of date of birth') that is NOT explicitly described in the retrieved source context, you MUST treat it as having insufficient information. Do NOT guess, assume, or fabricate a process, options, or fees. You MUST reply EXACTLY with the language-specific fallback message.
-  4. If the provided source documents do not contain enough information to answer the user's specific query, you MUST reply EXACTLY with: \"I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal.\" (or its equivalent translation based on the query language: \"मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।\" for Hindi, and \"Mere paas is question ka answer dene ke liye records mein context ya paryapt information nahi hai. Kripya Sewa Setu portal par check karein.\" for Hinglish).
+  1. Do NOT assume, extrapolate, or use external knowledge. Simple mathematical calculations, duration comparisons, or logical time-period deductions based directly on facts in the context (for example, comparing a user's stated delay or timeframe against a deadline or duration limit specified in the context) are allowed and expected, and are NOT considered extrapolation. Additionally, treat equivalent administrative terms as referring to the same process (for example, submitting the marriage memorandum refers to registering a marriage under the rules).
+  2. LOGICAL DEDUCTION: If a query asks about a timeframe, delay, or duration that exceeds a deadline or time limit specified in the context, you must reason step-by-step: first identify the deadline/timeframe in the context, then compare the user's duration to that deadline, and clearly state the penalty, fine, or consequences defined in the context rules. Specifically, if a rule requires an action within a specific timeframe (like submitting a memorandum within 30 days) and another rule penalizes the failure to perform that action under the first rule, then performing that action after the timeframe has passed (like after 1 year) constitutes a failure to comply with the timeframe and is subject to that penalty/fine. You must explain that the penalty/fine (e.g. fine up to 500 rupees) applies to such late submissions/registrations. Do not claim there is no penalty or that the fine only applies to not submitting at all.
+  3. If the user's query refers to a specific named individual, public figure, celebrity, politician, organization, or entity (e.g. Narendra Modi, Rahul Gandhi, MS Dhoni, etc.) that is NOT explicitly mentioned in the source documents, you MUST treat it as having insufficient information and reply EXACTLY with the language-specific fallback message. You are STRICTLY FORBIDDEN from using external knowledge about their background, or applying the context eligibility criteria to speculate on their status.
+  4. If the user asks about performing a specific action, update, process, correction, or change (e.g. 'address change on marriage certificate', 'download certificate using digital signature', 'correction of date of birth') that is NOT explicitly described in the retrieved source context, you MUST treat it as having insufficient information. Do NOT guess, assume, or fabricate a process, options, or fees. You MUST reply EXACTLY with the language-specific fallback message.
+  5. If the provided source documents do not contain enough information to answer the user's specific query, you MUST reply EXACTLY with: "I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal." (or its equivalent translation based on the query language: "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।" for Hindi, and "Mere paas is question ka answer dene ke liye records mein context ya paryapt information nahi hai. Kripya Sewa Setu portal par check karein." for Hinglish).
 - NO PLACEHOLDERS OR BLANK FORM TEMPLATES: If you find yourself writing template placeholders like '[जिला का नाम]', '[तहसील का नाम]', '[आवेदक का नाम]', 'वर्ष २०', 'दिनांक', 'क्रमांक', or generic blank template fields, it means the source documents DO NOT contain the actual address or answer. You are STRICTLY FORBIDDEN from outputting these placeholders. In all such cases, you MUST return the exact fallback message instead.
 - Ignore any contradictions in conversation history.
 
@@ -729,6 +730,8 @@ CRITICAL: Never mention 'RAG', 'English Source', 'Hindi Source', 'context', or t
             lang_str = "hi" if query_lang == "hi" else "en"
             details_link = f"https://sewasetu.cgstate.gov.in/instractionPageNew.do?serviceId={service_id}&lang={lang_str}"
             
+    grounding_status = "N/A"
+
     if is_info_not_available(final_reply):
         final_reply = fallback_msg
 
@@ -750,7 +753,8 @@ CRITICAL: Never mention 'RAG', 'English Source', 'Hindi Source', 'context', or t
             "context_hi": context_hi,
             "english_answer": "N/A",
             "hindi_answer": "N/A",
-            "service_id": service_id
+            "service_id": service_id,
+            "grounding_status": grounding_status
         }
     return {"response": final_reply, "service_id": service_id}
 
@@ -1063,7 +1067,7 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
     # Apply the safeguard fallback override on the final synthesized response
     final_text = res["response"] if isinstance(res, dict) else res
     if is_info_not_available(final_text):
-        print("[RAG Safe-Guard] Programmatic bypass: Returning language-specific fallback message directly.")
+        print(f"[RAG Safe-Guard] Programmatic bypass: Returning language-specific fallback message directly. Original text:\n{final_text}")
         if request.detailed:
             return {
                 "response": fallback_msg,
@@ -1075,7 +1079,8 @@ async def run_rag_pipeline(query: str, request: ChatRequest, service_id: Optiona
                 "english_answer": "I do not have sufficient information or context in my records to answer this question. Please check the Sewa Setu portal.",
                 "hindi_answer": "मेरे पास इस प्रश्न का उत्तर देने के लिए रिकॉर्ड में पर्याप्त जानकारी या आवश्यक संदर्भ नहीं है। कृपया सेवा सेतु पोर्टल पर जांच करें।",
                 "service_id": service_id,
-                "intent": intent
+                "intent": intent,
+                "grounding_status": res.get("grounding_status", "N/A") if isinstance(res, dict) else "N/A"
             }
         return {"response": fallback_msg, "service_id": service_id}
 

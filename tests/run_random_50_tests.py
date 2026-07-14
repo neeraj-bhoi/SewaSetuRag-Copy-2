@@ -385,8 +385,8 @@ with open(REPORT_PATH, "w", encoding="utf-8") as f:
     f.write("The questions cover all 5 scoped services of the SewaSetu Chhattisgarh Portal with a realistic ")
     f.write("mix of English, Hindi, and Hinglish queries.\n\n")
     f.write("## Execution Summary Table\n\n")
-    f.write("| ID | Service Category | User Query | Language | Mapped Service ID | Intent | Latency | Status |\n")
-    f.write("|----|------------------|------------|----------|-------------------|--------|---------|--------|\n")
+    f.write("| ID | Service Category | User Query | Language | Mapped Service ID | Intent | Grounding Guardrail | Latency | Status |\n")
+    f.write("|----|------------------|------------|----------|-------------------|--------|---------------------|---------|--------|\n")
 
 print(f"Starting test execution. Output report will be generated at: {REPORT_PATH}")
 
@@ -403,7 +403,7 @@ for tc in test_cases:
         "selected_sno": sno,
         "language": "en", # default language configuration
         "detailed": True,
-        "interactive": True,
+        "interactive": False,
         "is_option_click": False
     }
 
@@ -425,10 +425,11 @@ for tc in test_cases:
             ans_hi = data.get("hindi_answer", "N/A")
             service_id = data.get("service_id", "N/A")
             intent = data.get("intent", "new_topic")
+            grounding_status = data.get("grounding_status", "N/A")
             
             # Write row to summary table
             with open(REPORT_PATH, "a", encoding="utf-8") as f:
-                f.write(f"| {tc_id} | {service_cat} | `{query}` | {lang.upper()} ({q_lang}) | {service_id} | {intent} | {latency:.2f}s | ✅ SUCCESS |\n")
+                f.write(f"| {tc_id} | {service_cat} | `{query}` | {lang.upper()} ({q_lang}) | {service_id} | {intent} | {grounding_status} | {latency:.2f}s | ✅ SUCCESS |\n")
             
             # Write detailed case section
             with open(REPORT_PATH, "a", encoding="utf-8") as f:
@@ -440,6 +441,7 @@ for tc in test_cases:
                 f.write(f"* **Classified Intent**: `{intent}`\n")
                 f.write(f"* **Resolved English Translation**: `{english_q}`\n")
                 f.write(f"* **Resolved Hindi Translation**: `{hindi_q}`\n")
+                f.write(f"* **Grounding Status**: `{grounding_status}`\n")
                 
                 if ans_en and ans_en != "N/A":
                     f.write(f"* **Intermediate English Answer**:\n  ```markdown\n  {ans_en}\n  ```\n")
@@ -455,13 +457,13 @@ for tc in test_cases:
         else:
             latency = time.time() - start_time
             with open(REPORT_PATH, "a", encoding="utf-8") as f:
-                f.write(f"| {tc_id} | {service_cat} | `{query}` | {lang.upper()} | N/A | N/A | {latency:.2f}s | ❌ ERROR ({response.status_code}) |\n")
+                f.write(f"| {tc_id} | {service_cat} | `{query}` | {lang.upper()} | N/A | N/A | N/A | {latency:.2f}s | ❌ ERROR ({response.status_code}) |\n")
             print(f"[{tc_id}/50] Query: '{query[:40]}...' -> Status: ERROR ({response.status_code}, {latency:.2f}s)")
             
     except Exception as e:
         latency = time.time() - start_time
         with open(REPORT_PATH, "a", encoding="utf-8") as f:
-            f.write(f"| {tc_id} | {service_cat} | `{query}` | {lang.upper()} | N/A | N/A | {latency:.2f}s | ❌ EXCEPTION ({str(e)}) |\n")
+            f.write(f"| {tc_id} | {service_cat} | `{query}` | {lang.upper()} | N/A | N/A | N/A | {latency:.2f}s | ❌ EXCEPTION ({str(e)}) |\n")
         print(f"[{tc_id}/50] Query: '{query[:40]}...' -> Status: EXCEPTION ({str(e)}, {latency:.2f}s)")
 
 print(f"\nExecution Complete! Report saved to: {REPORT_PATH}")

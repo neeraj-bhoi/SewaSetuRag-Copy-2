@@ -7,7 +7,7 @@ import asyncio
 from fastapi.testclient import TestClient
 
 # Adjust path to import backend modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "05_webui"))
 
 from backend.main import app
 
